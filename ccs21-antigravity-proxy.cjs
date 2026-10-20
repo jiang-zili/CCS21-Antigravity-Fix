@@ -2,13 +2,60 @@
 
 const http = require('node:http');
 const crypto = require('node:crypto');
+const vm = require('node:vm');
 
-// agy 1.4.2 rejects messages from Theia's per-view localhost origin before
-// mounting its UI. Pin the reviewed bundle so a future backend cannot receive
-// an unreviewed JavaScript rewrite.
-const AGY_142_MAIN_SHA256 = '35f63c4b46aee4feb86e5997098b7baea5aea5223624ff373485afd0e07ba563';
-const AGY_142_ORIGIN_GUARD = 'function UNc(a,b=window.location.origin){if(!a||a==="null")return!1;';
+// Known builds have pinned profiles. Later builds may use the complete,
+// verified-compatible predicate below, regardless of minified symbol names.
+const REVIEWED_BUNDLES = Object.freeze({
+  '35f63c4b46aee4feb86e5997098b7baea5aea5223624ff373485afd0e07ba563': {
+    version: '1.4.2', guard: 'function UNc(a,b=window.location.origin){if(!a||a==="null")return!1;',
+  },
+  'f7d226472f8562e9e3596a9ce8b155aa19b2f11648f94f0d45fcd09fd28abd98': {
+    version: '1.4.3', guard: 'function PQc(a,b=window.location.origin){if(!a||a==="null")return!1;',
+  },
+});
 const MAX_MAIN_JS_BYTES = 16 * 1024 * 1024;
+const detectedProfiles = new Map();
+
+// Accept the same origin-check algorithm after a backend update, independent
+// of its minified function/variable names and HTTPS suffix allowlist. Match the
+// complete predicate, not merely a version string or a function-name prefix.
+function discoverOriginGuard(text) {
+  const id = '[A-Za-z_$][A-Za-z0-9_$]*';
+  const candidates = [...text.matchAll(new RegExp(
+    'function (' + id + ')\\((' + id + '),(' + id + ')=window\\.location\\.origin\\)\\{' +
+    '[\\s\\S]{0,4096}?\\}catch\\{return!1\\}\\}', 'g'))];
+  const matches = [];
+  for (const match of candidates) {
+    const prefix = 'function ' + match[1] + '(' + match[2] + ',' + match[3] + '=window.location.origin){';
+    const locals = match[0].match(new RegExp('let (' + id + ')=new URL\\(' + match[2].replace(/\$/g,'\\$') + '\\);'));
+    const hostname = match[0].match(new RegExp('let (' + id + ')=(' + id + ')\\.hostname;'));
+    if (!locals || !hostname || locals[1] !== hostname[2]) continue;
+    const names = [match[1], match[2], match[3], locals[1], hostname[1]];
+    if (new Set(names).size !== names.length) continue;
+    const replacements = new Map(names.map((name, i) => [name, ['FN','VALUE','EXPECTED','URLVAR','HOST'][i]]));
+    // Preserve string contents and property names when normalizing identifiers.
+    let normalized = match[0].replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[A-Za-z_$][A-Za-z0-9_$]*|\s+/g,
+      (token, offset, source) => {
+        if (/^\s+$/.test(token)) return '';
+        return source[offset - 1] !== '.' && replacements.has(token) ? replacements.get(token) : token;
+      });
+    const suffixes = /HOST\.endsWith\("(?:\.[a-z0-9-]+)+"\)(?:\|\|HOST\.endsWith\("(?:\.[a-z0-9-]+)+"\))*/g;
+    normalized = normalized.replace(suffixes, 'HTTPS_SUFFIXES');
+    const expected = 'functionFN(VALUE,EXPECTED=window.location.origin){if(!VALUE||VALUE==="null")return!1;' +
+      'if(VALUE===EXPECTED||VALUE.startsWith("vscode-webview://")||VALUE.startsWith("vscode-file://"))return!0;' +
+      'try{letURLVAR=newURL(VALUE);if(URLVAR.protocol!=="http:"&&URLVAR.protocol!=="https:")return!1;' +
+      'letHOST=URLVAR.hostname;returnHOST==="localhost"||HOST==="127.0.0.1"||HOST==="[::1]"||HOST==="::1"?!0:' +
+      'URLVAR.protocol==="https:"?HTTPS_SUFFIXES:!1}catch{return!1}}';
+    if (normalized !== expected) continue;
+    // Compile, without executing, the candidate and complete bundle.
+    new vm.Script('(' + match[0] + ')');
+    matches.push({ guard: prefix + 'if(!' + match[2] + '||' + match[2] + '==="null")return!1;', valueName: match[2] });
+  }
+  if (matches.length !== 1) throw new Error('Backend origin-check structure changed; expected one compatible predicate, found ' + matches.length + '.');
+  new vm.Script(text);
+  return { ...matches[0], version: 'auto-detected', mode: 'structure-verified' };
+}
 
 function validateTheiaOrigin(value) {
   const url = new URL(value);
@@ -44,20 +91,77 @@ function addExactFrameAncestor(policy, origin) {
   return result;
 }
 
-function adaptAgyMainJs(body, allowedOrigin, expectedHash = AGY_142_MAIN_SHA256) {
-  const origin = validateTheiaOrigin(allowedOrigin);
+function inspectAgyMainJs(body, reviewedBundles = REVIEWED_BUNDLES) {
   const source = Buffer.isBuffer(body) ? body : Buffer.from(body);
-  if (crypto.createHash('sha256').update(source).digest('hex') !== expectedHash) {
-    throw new Error('Unsupported agy main.js version; exact bundle hash changed.');
+  if (source.length > MAX_MAIN_JS_BYTES) throw new Error('agy main.js exceeds supported size limit.');
+  const sha256 = crypto.createHash('sha256').update(source).digest('hex');
+  let profile = Object.prototype.hasOwnProperty.call(reviewedBundles, sha256) && reviewedBundles[sha256];
+  if (!profile) {
+    profile = detectedProfiles.get(sha256);
+    if (!profile) {
+      try { profile = discoverOriginGuard(source.toString('utf8')); }
+      catch (error) { throw new Error('Unsupported agy origin-check structure; frontend SHA-256 ' + sha256 + '. ' + error.message); }
+      if (detectedProfiles.size >= 16) detectedProfiles.delete(detectedProfiles.keys().next().value);
+      detectedProfiles.set(sha256, profile);
+    }
   }
   const text = source.toString('utf8');
-  if (text.split(AGY_142_ORIGIN_GUARD).length !== 2) {
-    throw new Error('Expected exactly one agy 1.4.2 origin guard.');
+  if (text.split(profile.guard).length !== 2) {
+    throw new Error('Expected exactly one reviewed agy ' + profile.version + ' origin guard.');
   }
+  return { version: profile.version, mode: profile.mode || 'hash-pinned', sha256, guard: profile.guard, valueName: profile.valueName || 'a' };
+}
+
+function adaptAgyMainJs(body, allowedOrigin, reviewedBundles = REVIEWED_BUNDLES) {
+  const origin = validateTheiaOrigin(allowedOrigin);
+  const profile = inspectAgyMainJs(body, reviewedBundles);
+  const text = body.toString('utf8');
   return Buffer.from(text.replace(
-    AGY_142_ORIGIN_GUARD,
-    AGY_142_ORIGIN_GUARD + `if(a===${JSON.stringify(origin)})return!0;`,
+    profile.guard,
+    profile.guard + `if(${profile.valueName}===${JSON.stringify(origin)})return!0;`,
   ), 'utf8');
+}
+
+function validateBackendUrl(value) {
+  const backend = new URL(value);
+  if (backend.protocol !== 'http:' || backend.username || backend.password ||
+      !['localhost', '127.0.0.1', '[::1]'].includes(backend.hostname) ||
+      !backend.port || backend.pathname !== '/' || backend.search || backend.hash) {
+    throw new Error('Expected a fixed HTTP loopback agy backend origin.');
+  }
+  return backend;
+}
+
+// Run before installing and on every new backend/view pair. Never accept a
+// version string as proof: agy can update independently of the extension.
+function checkBackend(backendUrl) {
+  const backend = validateBackendUrl(backendUrl);
+  return new Promise((resolve, reject) => {
+    const request = http.get(new URL('/main.js', backend), {
+      headers: { 'accept-encoding': 'identity' }, agent: false,
+    }, response => {
+      if (response.statusCode !== 200 ||
+          !/^(?:application|text)\/(?:javascript|x-javascript)(?:\s*;|$)/i.test(String(response.headers['content-type'] || '')) ||
+          (response.headers['content-encoding'] && response.headers['content-encoding'] !== 'identity')) {
+        response.resume(); reject(new Error('Cannot verify agy main.js response.')); return;
+      }
+      const chunks = [];
+      let total = 0;
+      response.on('data', chunk => {
+        total += chunk.length;
+        if (total > MAX_MAIN_JS_BYTES) response.destroy(new Error('agy main.js exceeds reviewed size limit.'));
+        else chunks.push(chunk);
+      });
+      response.once('error', reject);
+      response.once('end', () => {
+        try { resolve(inspectAgyMainJs(Buffer.concat(chunks))); } catch (error) { reject(error); }
+      });
+    });
+    request.setTimeout(8000, () => request.destroy(new Error('agy backend check timed out.')));
+    const deadline = setTimeout(() => request.destroy(new Error('agy backend check deadline exceeded.')), 12000);
+    request.once('close', () => clearTimeout(deadline));
+    request.once('error', reject);
+  });
 }
 
 /**
@@ -67,13 +171,8 @@ function adaptAgyMainJs(body, allowedOrigin, expectedHash = AGY_142_MAIN_SHA256)
  * hash-pinned JavaScript message guard admit the exact origin. Binds to loopback.
  */
 async function createCcsEmbedProxy({ backendUrl, allowedOrigin }) {
-  const backend = new URL(backendUrl);
+  const backend = validateBackendUrl(backendUrl);
   const origin = validateTheiaOrigin(allowedOrigin);
-  if (backend.protocol !== 'http:' || backend.username || backend.password ||
-      !['localhost', '127.0.0.1', '[::1]'].includes(backend.hostname) ||
-      !backend.port || backend.pathname !== '/' || backend.search || backend.hash) {
-    throw new Error('Expected a fixed HTTP loopback agy backend origin.');
-  }
 
   const sockets = new Set();
   const upstreams = new Set();
@@ -270,7 +369,10 @@ async function getProxyUrl(backendUrl, allowedOrigin, context) {
   const key = backendOrigin + ' ' + origin;
   let pending = cache.get(key);
   if (!pending) {
-    pending = createCcsEmbedProxy({ backendUrl, allowedOrigin: origin }).then(proxy => {
+    pending = checkBackend(backendUrl).then(profile => {
+      console.log('[Antigravity CCS adapter] agy ' + profile.version + ', ' + profile.mode + ', SHA-256 ' + profile.sha256);
+      return createCcsEmbedProxy({ backendUrl, allowedOrigin: origin });
+    }).then(proxy => {
       context.subscriptions.push({ dispose: () => { void proxy.dispose(); } });
       return proxy;
     }).catch(error => {
@@ -282,4 +384,22 @@ async function getProxyUrl(backendUrl, allowedOrigin, context) {
   return (await pending).url;
 }
 
-module.exports = { getProxyUrl, createCcsEmbedProxy, getTheiaWebviewOrigin, adaptAgyMainJs };
+module.exports = { getProxyUrl, createCcsEmbedProxy, getTheiaWebviewOrigin, adaptAgyMainJs, inspectAgyMainJs, checkBackend, discoverOriginGuard };
+
+if (require.main === module) {
+  if (process.argv.length === 4 && process.argv[2] === '--binary-version') {
+    require('node:child_process').execFile(process.argv[3], ['--version'], {
+      timeout: 5000, windowsHide: true,
+    }, (error, stdout, stderr) => {
+      const match = (String(stdout) + String(stderr)).match(/\d+\.\d+\.\d+[^\s]*/);
+      console.log(match ? match[0] : 'unknown');
+    });
+  } else if (process.argv.length !== 4 || process.argv[2] !== '--check-backend') {
+    console.error('Usage: node ccs21-antigravity-proxy.cjs --check-backend http://127.0.0.1:PORT');
+    process.exitCode = 2;
+  } else {
+    checkBackend(process.argv[3]).then(({ version, mode, sha256 }) => {
+      console.log(JSON.stringify({ compatible: true, version, mode, sha256 }));
+    }).catch(error => { console.error(error.message); process.exitCode = 1; });
+  }
+}
