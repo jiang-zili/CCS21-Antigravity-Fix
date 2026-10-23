@@ -8,7 +8,7 @@
 
 ## 使用
 
-1. 下载 Release 中的 `CCS21-Antigravity-Fix-v1.3.0.zip`，完整解压。
+1. 下载 Release 页面提供的完整 ZIP（`Source code (zip)` 同样包含全部修复文件），完整解压。
 2. 建议先打开需要修复的 CCS 和 Antigravity，然后双击 `Run-Fix.cmd`。
 3. 找到唯一目标时自动处理；存在多个副本时选择正确目录；自动发现失败时通过文件选择窗口定位 `ccstudio.exe` 或包含 Google Antigravity `package.json` 的扩展目录。
 4. 修复完成后重载 CCS 窗口。只有能确认原启动进程及其参数时，脚本才尝试正常关闭并保留参数重启；否则提示执行 **Developer: Reload Window**。保存提示由本人处理。
