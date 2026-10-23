@@ -23,13 +23,13 @@ const detectedProfiles = new Map();
 function discoverOriginGuard(text) {
   const id = '[A-Za-z_$][A-Za-z0-9_$]*';
   const candidates = [...text.matchAll(new RegExp(
-    'function (' + id + ')\\((' + id + '),(' + id + ')=window\\.location\\.origin\\)\\{' +
-    '[\\s\\S]{0,4096}?\\}catch\\{return!1\\}\\}', 'g'))];
+    'function\\s+(' + id + ')\\s*\\(\\s*(' + id + ')\\s*,\\s*(' + id + ')\\s*=\\s*window\\.location\\.origin\\s*\\)\\s*\\{' +
+    '[\\s\\S]{0,4096}?\\}\\s*catch\\s*\\{\\s*return\\s*(?:!1|false)\\s*;?\\s*\\}\\s*\\}', 'g'))];
   const matches = [];
   for (const match of candidates) {
-    const prefix = 'function ' + match[1] + '(' + match[2] + ',' + match[3] + '=window.location.origin){';
-    const locals = match[0].match(new RegExp('let (' + id + ')=new URL\\(' + match[2].replace(/\$/g,'\\$') + '\\);'));
-    const hostname = match[0].match(new RegExp('let (' + id + ')=(' + id + ')\\.hostname;'));
+    const prefix = match[0].slice(0, match[0].indexOf('{') + 1);
+    const locals = match[0].match(new RegExp('(?:let|const|var)\\s+(' + id + ')\\s*=\\s*new\\s+URL\\(\\s*' + match[2].replace(/\$/g,'\\$') + '\\s*\\)\\s*;'));
+    const hostname = match[0].match(new RegExp('(?:let|const|var)\\s+(' + id + ')\\s*=\\s*(' + id + ')\\.hostname\\s*;'));
     if (!locals || !hostname || locals[1] !== hostname[2]) continue;
     const names = [match[1], match[2], match[3], locals[1], hostname[1]];
     if (new Set(names).size !== names.length) continue;
@@ -38,8 +38,15 @@ function discoverOriginGuard(text) {
     let normalized = match[0].replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[A-Za-z_$][A-Za-z0-9_$]*|\s+/g,
       (token, offset, source) => {
         if (/^\s+$/.test(token)) return '';
+        // Only a complete quoted literal reaches this branch. Canonicalize
+        // quote style without evaluating any part of the frontend bundle.
+        if (/^["']/.test(token)) return JSON.stringify(vm.runInNewContext(token, Object.create(null), { timeout: 50 }));
+        if (token === 'true') return '!0';
+        if (token === 'false') return '!1';
+        if (['var','const'].includes(token)) return 'let';
         return source[offset - 1] !== '.' && replacements.has(token) ? replacements.get(token) : token;
       });
+    normalized = normalized.replace(/;\}/g, '}');
     const suffixes = /HOST\.endsWith\("(?:\.[a-z0-9-]+)+"\)(?:\|\|HOST\.endsWith\("(?:\.[a-z0-9-]+)+"\))*/g;
     normalized = normalized.replace(suffixes, 'HTTPS_SUFFIXES');
     const expected = 'functionFN(VALUE,EXPECTED=window.location.origin){if(!VALUE||VALUE==="null")return!1;' +
@@ -50,7 +57,7 @@ function discoverOriginGuard(text) {
     if (normalized !== expected) continue;
     // Compile, without executing, the candidate and complete bundle.
     new vm.Script('(' + match[0] + ')');
-    matches.push({ guard: prefix + 'if(!' + match[2] + '||' + match[2] + '==="null")return!1;', valueName: match[2] });
+    matches.push({ guard: prefix, valueName: match[2] });
   }
   if (matches.length !== 1) throw new Error('Backend origin-check structure changed; expected one compatible predicate, found ' + matches.length + '.');
   new vm.Script(text);
@@ -403,3 +410,4 @@ if (require.main === module) {
     }).catch(error => { console.error(error.message); process.exitCode = 1; });
   }
 }
+
