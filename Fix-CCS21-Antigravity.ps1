@@ -7,15 +7,18 @@ The generated Fix-CCS21-Antigravity.ps1 includes its adapter and works offline.
 param(
     [string]$ExtensionDir,
     [string]$CcsExe,
+    [string]$ProfileDir,
+    [string[]]$SearchRoot,
     [string]$BackendUrl,
     [string]$ReportDir,
     [switch]$CheckOnly,
     [switch]$Restore,
-    [switch]$NoRestart
+    [switch]$NoRestart,
+    [switch]$NonInteractive
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
-$toolVersion = '1.2.0'
+$toolVersion = '1.3.0'
 if (-not $ReportDir) { $ReportDir = Join-Path $PSScriptRoot 'AgentOutput' }
 $adapter = @'
 'use strict';
@@ -43,13 +46,13 @@ const detectedProfiles = new Map();
 function discoverOriginGuard(text) {
   const id = '[A-Za-z_$][A-Za-z0-9_$]*';
   const candidates = [...text.matchAll(new RegExp(
-    'function (' + id + ')\\((' + id + '),(' + id + ')=window\\.location\\.origin\\)\\{' +
-    '[\\s\\S]{0,4096}?\\}catch\\{return!1\\}\\}', 'g'))];
+    'function\\s+(' + id + ')\\s*\\(\\s*(' + id + ')\\s*,\\s*(' + id + ')\\s*=\\s*window\\.location\\.origin\\s*\\)\\s*\\{' +
+    '[\\s\\S]{0,4096}?\\}\\s*catch\\s*\\{\\s*return\\s*(?:!1|false)\\s*;?\\s*\\}\\s*\\}', 'g'))];
   const matches = [];
   for (const match of candidates) {
-    const prefix = 'function ' + match[1] + '(' + match[2] + ',' + match[3] + '=window.location.origin){';
-    const locals = match[0].match(new RegExp('let (' + id + ')=new URL\\(' + match[2].replace(/\$/g,'\\$') + '\\);'));
-    const hostname = match[0].match(new RegExp('let (' + id + ')=(' + id + ')\\.hostname;'));
+    const prefix = match[0].slice(0, match[0].indexOf('{') + 1);
+    const locals = match[0].match(new RegExp('(?:let|const|var)\\s+(' + id + ')\\s*=\\s*new\\s+URL\\(\\s*' + match[2].replace(/\$/g,'\\$') + '\\s*\\)\\s*;'));
+    const hostname = match[0].match(new RegExp('(?:let|const|var)\\s+(' + id + ')\\s*=\\s*(' + id + ')\\.hostname\\s*;'));
     if (!locals || !hostname || locals[1] !== hostname[2]) continue;
     const names = [match[1], match[2], match[3], locals[1], hostname[1]];
     if (new Set(names).size !== names.length) continue;
@@ -58,8 +61,15 @@ function discoverOriginGuard(text) {
     let normalized = match[0].replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[A-Za-z_$][A-Za-z0-9_$]*|\s+/g,
       (token, offset, source) => {
         if (/^\s+$/.test(token)) return '';
+        // Only a complete quoted literal reaches this branch. Canonicalize
+        // quote style without evaluating any part of the frontend bundle.
+        if (/^["']/.test(token)) return JSON.stringify(vm.runInNewContext(token, Object.create(null), { timeout: 50 }));
+        if (token === 'true') return '!0';
+        if (token === 'false') return '!1';
+        if (['var','const'].includes(token)) return 'let';
         return source[offset - 1] !== '.' && replacements.has(token) ? replacements.get(token) : token;
       });
+    normalized = normalized.replace(/;\}/g, '}');
     const suffixes = /HOST\.endsWith\("(?:\.[a-z0-9-]+)+"\)(?:\|\|HOST\.endsWith\("(?:\.[a-z0-9-]+)+"\))*/g;
     normalized = normalized.replace(suffixes, 'HTTPS_SUFFIXES');
     const expected = 'functionFN(VALUE,EXPECTED=window.location.origin){if(!VALUE||VALUE==="null")return!1;' +
@@ -70,7 +80,7 @@ function discoverOriginGuard(text) {
     if (normalized !== expected) continue;
     // Compile, without executing, the candidate and complete bundle.
     new vm.Script('(' + match[0] + ')');
-    matches.push({ guard: prefix + 'if(!' + match[2] + '||' + match[2] + '==="null")return!1;', valueName: match[2] });
+    matches.push({ guard: prefix, valueName: match[2] });
   }
   if (matches.length !== 1) throw new Error('Backend origin-check structure changed; expected one compatible predicate, found ' + matches.length + '.');
   new vm.Script(text);
@@ -434,13 +444,18 @@ function TextHash([string]$value) {
 }
 function FileHash([string]$path) {
     $algorithm = [Security.Cryptography.SHA256]::Create()
-    $stream = [IO.File]::OpenRead($path)
+    $stream = [IO.File]::OpenRead((IOPath $path))
     try { return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-','') }
     finally { $stream.Dispose(); $algorithm.Dispose() }
 }
+function BytesHash([byte[]]$bytes) {
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace('-','') }
+    finally { $algorithm.Dispose() }
+}
 function GetRenderPlan([string]$source) {
     $id = '[A-Za-z_$][A-Za-z0-9_$]*'
-    $pattern = 'renderIframe\((?<view>'+$id+'),(?<server>'+$id+'),(?<options>'+$id+')\)\{(?<body>(?:var|let|const) (?<url>'+$id+')=this\.buildIframeUrl\(\k<server>,\k<options>\);console\.log\(`\[Jetski\] Loading iframe URL: \$\{'+$id+'\(\k<url>\)\}`\);this\.renderWebviewHtml\(\k<view>,\k<server>,\k<url>,\k<options>\))\}'
+    $pattern = '(?<![\w$])(?:async\s+)?renderIframe\s*\(\s*(?<view>'+$id+')\s*,\s*(?<server>'+$id+')\s*,\s*(?<options>'+$id+')\s*\)\s*\{\s*(?<body>(?:var|let|const)\s+(?<url>'+$id+')\s*=\s*this\.buildIframeUrl\(\s*\k<server>\s*,\s*\k<options>\s*\)\s*;\s*(?:console\.log\(`\[Jetski\] Loading iframe URL: \$\{'+$id+'\(\k<url>\)\}`\);\s*)?(?:return\s+)?this\.renderWebviewHtml\(\s*\k<view>\s*,\s*\k<server>\s*,\s*\k<url>\s*,\s*\k<options>\s*\)\s*;?\s*)\}'
     $found = [regex]::Matches($source,$pattern)
     if ($found.Count -ne 1) { throw ('Unsupported extension renderer structure: expected one local renderer, found ' + $found.Count + '. No files changed.') }
     $match = $found[0]
@@ -452,37 +467,207 @@ function GetRenderPlan([string]$source) {
     $replacement = 'async renderIframe('+$view+','+$server+','+$options+'){'+$injection+$match.Groups['body'].Value+'}'
     return [PSCustomObject]@{ originalMethod=$match.Value; replacement=$replacement }
 }
-if ($CheckOnly -and $Restore) { throw 'Use either -CheckOnly or -Restore.' }
-if (-not $ExtensionDir) {
-    $ccsRoot = Join-Path $env:LOCALAPPDATA 'Texas Instruments\CCS'
-    $candidates = @(Get-ChildItem -LiteralPath $ccsRoot -Directory -Filter 'ccs21*' | ForEach-Object {
-        Get-ChildItem -LiteralPath $_.FullName -Directory | Where-Object { $_.Name -match '^\d+$' } | ForEach-Object {
-        $deployment = Join-Path $_.FullName 'theia\deployedPlugins'
-        if (Test-Path -LiteralPath $deployment) {
-            Get-ChildItem -LiteralPath $deployment -Directory -Filter 'google.google-antigravity*' | ForEach-Object {
-                $candidate = Join-Path $_.FullName 'extension'
-                if (Test-Path -LiteralPath (Join-Path $candidate 'package.json')) { Get-Item -LiteralPath $candidate }
+# Discovery is based on package identity and executable structure, never folder/version names.
+function IOPath([string]$Path) {
+    $full = [IO.Path]::GetFullPath($Path)
+    if ($full.StartsWith('\\?\')) { return $full }
+    if ($full.StartsWith('\\')) { return '\\?\UNC\' + $full.Substring(2) }
+    return '\\?\' + $full
+}
+function Read-Property($Value, [string]$Name) {
+    if ($null -ne $Value -and $null -ne $Value.PSObject.Properties[$Name]) { return $Value.$Name }
+    return $null
+}
+function Get-CcsProcesses {
+    try { return @(Get-CimInstance Win32_Process -Filter "Name='ccstudio.exe' OR Name='agy.exe'" -ErrorAction Stop) }
+    catch {
+        Write-Verbose 'Process command lines unavailable; using executable paths and explicit search roots.'
+        return @(Get-Process -Name ccstudio,agy -ErrorAction SilentlyContinue | ForEach-Object {
+            [PSCustomObject]@{ Name=($_.ProcessName + '.exe'); ExecutablePath=$_.Path; CommandLine=''; ProcessId=$_.Id }
+        })
+    }
+}
+function Get-LaunchPath([string]$CommandLine, [string]$Option) {
+    $pattern = '(?:^|\s)--' + [regex]::Escape($Option) + '(?:=|\s+)(?:"(?<quoted>[^"]+)"|(?<plain>[^\s]+))'
+    foreach ($match in [regex]::Matches($CommandLine,$pattern)) {
+        if ($match.Groups['quoted'].Success) { $match.Groups['quoted'].Value }
+        else { $match.Groups['plain'].Value }
+    }
+}
+function Get-SearchDirectories([string[]]$Roots, [int]$Depth=6) {
+    $queue = New-Object 'System.Collections.Generic.Queue[object]'
+    $visited = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($root in $Roots) {
+        if (-not $root -or -not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+        $queue.Enqueue([PSCustomObject]@{ Path=[IO.Path]::GetFullPath($root); Level=0 })
+    }
+    while ($queue.Count -gt 0) {
+        $item = $queue.Dequeue()
+        if (-not $visited.Add($item.Path)) { continue }
+        $item.Path
+        if ($item.Level -ge $Depth) { continue }
+        foreach ($dir in @(Get-ChildItem -LiteralPath $item.Path -Directory -Force -ErrorAction SilentlyContinue)) {
+            if (($dir.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $dir.Name -in @('node_modules','.git','AgentOutput')) { continue }
+            $queue.Enqueue([PSCustomObject]@{ Path=$dir.FullName; Level=($item.Level+1) })
+        }
+    }
+}
+function Get-AntigravityPackage([string]$Directory) {
+    $manifestPath = Join-Path $Directory 'package.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return }
+    try {
+        $pkg = [IO.File]::ReadAllText((IOPath $manifestPath)) | ConvertFrom-Json
+        if ((Read-Property $pkg 'publisher') -ne 'google' -or (Read-Property $pkg 'name') -ne 'google-antigravity') { return }
+        $main = [string](Read-Property $pkg 'main')
+        if (-not $main) { $main = 'extension.js' }
+        $root = [IO.Path]::GetFullPath($Directory).TrimEnd([char[]]'\/')
+        $entry = [IO.Path]::GetFullPath((Join-Path $root $main))
+        if (-not [IO.Path]::HasExtension($entry)) { $entry += '.js' }
+        if (-not $entry.StartsWith($root+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { throw 'Package main escapes its extension directory.' }
+        if (-not (Test-Path -LiteralPath $entry -PathType Leaf)) { return }
+        [PSCustomObject]@{ Directory=$root; Entry=$entry; Package=$pkg; Version=[string](Read-Property $pkg 'version') }
+    } catch { Write-Verbose ('Cannot use extension package ' + $Directory + ': ' + $_.Exception.Message) }
+}
+function Find-AntigravityExtensions([string[]]$Roots) {
+    $result = @{}
+    foreach ($dir in @(Get-SearchDirectories $Roots)) {
+        $candidate = Get-AntigravityPackage $dir
+        if ($null -ne $candidate) { $result[$candidate.Directory] = $candidate }
+    }
+    @($result.Values | Sort-Object Directory)
+}
+function Resolve-CcsExecutable([string]$Path) {
+    if (-not $Path) { return }
+    $Path = [Environment]::ExpandEnvironmentVariables($Path.Trim('"'))
+    $possibilities = @($Path)
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        $possibilities = @('ccstudio.exe','theia\ccstudio.exe','ccs\theia\ccstudio.exe') | ForEach-Object { Join-Path $Path $_ }
+    }
+    foreach ($exe in $possibilities) {
+        if (-not (Test-Path -LiteralPath $exe -PathType Leaf) -or [IO.Path]::GetFileName($exe) -ine 'ccstudio.exe') { continue }
+        $exe = [IO.Path]::GetFullPath($exe)
+        $node = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $exe) '..\tools\node\node.exe'))
+        if ((Test-Path -LiteralPath $node -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $exe) 'resources') -PathType Container)) {
+            return [PSCustomObject]@{ Executable=$exe; Node=$node }
+        }
+    }
+}
+function Find-CcsInstallations([object[]]$Processes, [string[]]$Roots) {
+    $hints = @($Processes | Where-Object { $_.Name -ieq 'ccstudio.exe' } | ForEach-Object { $_.ExecutablePath })
+    $running = @{}
+    foreach ($hint in $hints) {
+        $candidate=Resolve-CcsExecutable $hint
+        if ($null -ne $candidate) { $running[$candidate.Executable]=$candidate }
+    }
+    if ($running.Count -gt 0) { return @($running.Values | Sort-Object Executable) }
+    foreach ($name in @('CCS_HOME','CCS_INSTALL_DIR','TI_CCS_ROOT')) {
+        $value = [Environment]::GetEnvironmentVariable($name)
+        if ($value) { $hints += $value }
+    }
+    # Registry/shortcut locations are hints, never required install locations.
+    foreach ($key in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')) {
+        foreach ($app in @(Get-ItemProperty -Path $key -ErrorAction SilentlyContinue)) {
+            if ([string](Read-Property $app 'DisplayName') -match '(?i)Code Composer|CCStudio') {
+                $hints += [string](Read-Property $app 'InstallLocation')
+                $icon = [string](Read-Property $app 'DisplayIcon')
+                if ($icon) { $hints += ($icon -replace ',\s*-?\d+$','').Trim('"') }
             }
         }
+    }
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        foreach ($special in @('Programs','CommonPrograms','Desktop','CommonDesktopDirectory')) {
+            $folder = [Environment]::GetFolderPath($special)
+            if (-not $folder) { continue }
+            foreach ($dir in @(Get-SearchDirectories @($folder) 3)) {
+                foreach ($link in @(Get-ChildItem -LiteralPath $dir -Filter '*.lnk' -File -ErrorAction SilentlyContinue)) {
+                    $target = $shell.CreateShortcut($link.FullName).TargetPath
+                    if ([IO.Path]::GetFileName($target) -ieq 'ccstudio.exe') { $hints += $target }
+                }
+            }
         }
-    })
-    if ($candidates.Count -ne 1) { throw 'Expected one CCS21 Antigravity installation. Pass -ExtensionDir with its extension folder.' }
-    $ExtensionDir = $candidates[0].FullName
+    } catch { Write-Verbose 'Shortcut discovery unavailable.' }
+    foreach ($dir in @(Get-SearchDirectories $Roots 3)) { $hints += $dir }
+    $result = @{}
+    foreach ($hint in @($hints | Where-Object { $_ } | Sort-Object -Unique)) {
+        $candidate = Resolve-CcsExecutable $hint
+        if ($null -ne $candidate) { $result[$candidate.Executable] = $candidate }
+    }
+    @($result.Values | Sort-Object Executable)
 }
-$ExtensionDir = (Resolve-Path -LiteralPath $ExtensionDir).Path
-$package = Get-Content -LiteralPath (Join-Path $ExtensionDir 'package.json') -Raw | ConvertFrom-Json
-if ($package.publisher -ne 'google' -or $package.name -ne 'google-antigravity' -or $package.version -notmatch '^\d+\.\d+\.\d+') {
-    throw 'Expected a Google Antigravity extension package with a valid version.'
+function Select-RepairTarget([object[]]$Candidates,[string]$Label,[string]$Property,[switch]$Headless) {
+    if ($Candidates.Count -eq 1) { return $Candidates[0] }
+    if ($Candidates.Count -gt 1 -and -not $Headless) {
+        Write-Host ('Multiple ' + $Label + ' found. Select the intended installation:')
+        for ($i=0;$i -lt $Candidates.Count;$i++) { Write-Host ('[{0}] {1}' -f ($i+1),$Candidates[$i].$Property) }
+        $answer=0
+        if ([int]::TryParse((Read-Host 'Number (empty cancels)'),[ref]$answer) -and $answer -ge 1 -and $answer -le $Candidates.Count) { return $Candidates[$answer-1] }
+        throw 'Selection cancelled. No files changed.'
+    }
+    if ($Headless) { throw ('Found ' + $Candidates.Count + ' ' + $Label + '. Specify -ExtensionDir/-CcsExe or -ProfileDir/-SearchRoot; no files changed.') }
+    Add-Type -AssemblyName System.Windows.Forms
+    if ($Label -eq 'CCS executable') {
+        $dialog = New-Object Windows.Forms.OpenFileDialog
+        $dialog.Title='Select ccstudio.exe at its actual installation location'
+        $dialog.Filter='CCStudio (ccstudio.exe)|ccstudio.exe'
+    } else {
+        $dialog = New-Object Windows.Forms.FolderBrowserDialog
+        $dialog.Description='Select the Antigravity extension folder containing package.json'
+    }
+    try {
+        if ($dialog.ShowDialog() -ne [Windows.Forms.DialogResult]::OK) { throw 'Selection cancelled. No files changed.' }
+        if ($Label -eq 'CCS executable') { $selected=Resolve-CcsExecutable $dialog.FileName }
+        else { $selected=Get-AntigravityPackage $dialog.SelectedPath }
+        if ($null -eq $selected) { throw 'Selected location has no compatible installation structure. No files changed.' }
+        return $selected
+    } finally { $dialog.Dispose() }
 }
+
+# Dot-sourcing exposes pure planning/discovery functions for isolated tests.
+if ($MyInvocation.InvocationName -eq '.') { return }
+if ($CheckOnly -and $Restore) { throw 'Use either -CheckOnly or -Restore.' }
+$processInventory = @(Get-CcsProcesses)
+if (-not $ExtensionDir) {
+    $roots = @()
+    if ($ProfileDir) { $roots = @($ProfileDir) }
+    elseif ($SearchRoot) { $roots = @($SearchRoot) }
+    else {
+        foreach ($proc in $processInventory | Where-Object { $_.Name -ieq 'ccstudio.exe' }) {
+            foreach ($option in @('user-data-dir','plugins','extensions-dir')) {
+                foreach ($launchPath in @(Get-LaunchPath ([string]$proc.CommandLine) $option)) {
+                    $launchPath=$launchPath -replace '^local-dir:',''
+                    $roots += $launchPath
+                    $parent=Split-Path -Parent $launchPath
+                    if ($parent -and (Test-Path -LiteralPath (Join-Path $parent 'theia') -PathType Container)) { $roots += $parent }
+                }
+            }
+        }
+        $roots = @($roots | Where-Object { Test-Path -LiteralPath $_ -PathType Container } | Sort-Object -Unique)
+        # Active launch paths take precedence over stale profiles.
+        $active = @(Find-AntigravityExtensions $roots)
+        if ($active.Count -eq 0) {
+            foreach ($base in @($env:LOCALAPPDATA,$env:APPDATA)) {
+                if ($base) { $roots += Join-Path $base 'Texas Instruments\CCS' }
+            }
+        }
+    }
+    $target = Select-RepairTarget @(Find-AntigravityExtensions $roots) 'Antigravity extension' 'Directory' -Headless:$NonInteractive
+    $ExtensionDir = $target.Directory
+}
+$extensionInfo = Get-AntigravityPackage $ExtensionDir
+if ($null -eq $extensionInfo) { throw 'Expected a Google Antigravity package and an existing package.main entry inside its directory. No files changed.' }
+$ExtensionDir = $extensionInfo.Directory
+$package = $extensionInfo.Package
 Write-Host ('Detected Antigravity extension ' + $package.version + '. Checking renderer structure.')
-$entryFile = Join-Path $ExtensionDir 'extension.js'
-$helperFile = Join-Path $ExtensionDir 'ccs21-antigravity-proxy.cjs'
+$entryFile = $extensionInfo.Entry
+$helperFile = Join-Path (Split-Path -Parent $entryFile) 'ccs21-antigravity-proxy.cjs'
 $legacyBackupFile = Join-Path $ExtensionDir 'ccs21-antigravity-backup\extension.js.original'
 $backupRoot = Join-Path $ExtensionDir 'AgentOutput\CCS21-Antigravity'
 $manifestFile = Join-Path $backupRoot 'installed.json'
 $manifest = $null
-if (Test-Path -LiteralPath $manifestFile) { $manifest = Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json }
-$current = [IO.File]::ReadAllText($entryFile)
+if ([IO.File]::Exists((IOPath $manifestFile))) { $manifest = [IO.File]::ReadAllText((IOPath $manifestFile)) | ConvertFrom-Json }
+$current = [IO.File]::ReadAllText((IOPath $entryFile))
+$currentBytes = [IO.File]::ReadAllBytes((IOPath $entryFile))
 $currentHash = FileHash $entryFile
 $legacyPatched = $current.Contains($legacyPatchedMethod)
 $alreadyPatched = $legacyPatched -or $current.Contains('/*CCS21_AG_ADAPTER_START*/')
@@ -491,15 +676,17 @@ if ($alreadyPatched -and -not $legacyPatched) {
     $sourceBackup = [IO.Path]::GetFullPath([string]$manifest.originalFile)
     if (-not $sourceBackup.StartsWith([IO.Path]::GetFullPath($backupRoot) + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { throw 'Backup manifest points outside AgentOutput.' }
     if ((FileHash $sourceBackup) -ne $manifest.originalSha256) { throw 'Original backup failed SHA-256 validation.' }
-    $original = [IO.File]::ReadAllText($sourceBackup)
+    $original = [IO.File]::ReadAllText((IOPath $sourceBackup))
 } elseif ($legacyPatched) {
     $sourceBackup = Join-Path $backupRoot 'extension.js.original'
-    if (-not (Test-Path -LiteralPath $sourceBackup)) { $sourceBackup = $legacyBackupFile }
-    if (-not (Test-Path -LiteralPath $sourceBackup)) { throw 'Patch backup is missing; refusing an unverifiable repair.' }
-    $original = [IO.File]::ReadAllText($sourceBackup)
+    if (-not ([IO.File]::Exists((IOPath $sourceBackup)))) { $sourceBackup = $legacyBackupFile }
+    if (-not ([IO.File]::Exists((IOPath $sourceBackup)))) { throw 'Patch backup is missing; refusing an unverifiable repair.' }
+    $original = [IO.File]::ReadAllText((IOPath $sourceBackup))
     if ((TextHash $original) -ne $legacyOriginalHash) { throw 'Legacy original backup does not match the reviewed build.' }
 } else { $original = $current }
-$originalHash = TextHash $original
+if ($alreadyPatched) { $originalBytes = [IO.File]::ReadAllBytes((IOPath $sourceBackup)) }
+else { $originalBytes = $currentBytes }
+$originalHash = BytesHash $originalBytes
 # Keep Windows PowerShell 5.1 paths below MAX_PATH. Verify the full hash on
 # every reuse, so a shortened directory name never authorizes another source.
 $backupDir = Join-Path $backupRoot $originalHash.Substring(0,12)
@@ -508,7 +695,7 @@ $plan = GetRenderPlan $original
 $patched = $original.Replace($plan.originalMethod,$plan.replacement)
 if ($legacyPatched -and $currentHash -ne (TextHash ($original.Replace($plan.originalMethod,$legacyPatchedMethod)))) { throw 'Other legacy extension changes detected; refusing to overwrite.' }
 Write-Host ('Compatible renderer detected. Source SHA-256: ' + $originalHash)
-if (Test-Path -LiteralPath $helperFile) {
+if ([IO.File]::Exists((IOPath $helperFile))) {
     $helperHash = FileHash $helperFile
     $knownHelpers = @((TextHash $adapter),'D9F36391B8F33025E4BE0502F7BE55E49042A9766509A44646AF2A7F6FFC30B3','F7DDA1CDB4A063D3C128A201439A45FD35203ACBDA193B0CF6B4E3EFC241069E')
     if ($null -ne $manifest) { $knownHelpers += [string]$manifest.adapterSha256 }
@@ -519,25 +706,35 @@ $backendChecks = @()
 $binaryVersions = @()
 if (-not $Restore) {
     if (-not $CcsExe) {
-        $ccsPaths = @(Get-Process -Name ccstudio -ErrorAction SilentlyContinue | ForEach-Object { $_.Path } | Where-Object { $_ -like '*\ccs21*\ccs\theia\ccstudio.exe' } | Sort-Object -Unique)
-        if ($ccsPaths.Count -eq 1) { $CcsExe = $ccsPaths[0] }
-        elseif (Test-Path -LiteralPath 'C:\ti\ccs2101\ccs\theia\ccstudio.exe') { $CcsExe = 'C:\ti\ccs2101\ccs\theia\ccstudio.exe' }
+        $ccsTarget = Select-RepairTarget @(Find-CcsInstallations $processInventory $SearchRoot) 'CCS executable' 'Executable' -Headless:$NonInteractive
+    } else {
+        $ccsTarget = Resolve-CcsExecutable $CcsExe
     }
-    if (-not $CcsExe -or -not (Test-Path -LiteralPath $CcsExe)) { throw 'Pass -CcsExe pointing to the CCS21 executable. No files changed.' }
-    $nodeExe = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $CcsExe) '..\tools\node\node.exe'))
-    if (-not (Test-Path -LiteralPath $nodeExe)) { throw 'CCS bundled Node.js was not found. No files changed.' }
+    if ($null -eq $ccsTarget) { throw 'Selected CCS has no bundled Node.js/resources structure. No files changed.' }
+    $CcsExe = $ccsTarget.Executable
+    $nodeExe = $ccsTarget.Node
+    Write-Host ('CCS executable: ' + $CcsExe)
     $backendUrls = @()
-    $backendProcesses = @(Get-CimInstance Win32_Process -Filter "Name='agy.exe'")
+    $backendProcesses = @($processInventory | Where-Object { $_.Name -ieq 'agy.exe' })
     if ($BackendUrl) { $backendUrls = @($BackendUrl) }
     else {
         $backendUrls = @($backendProcesses | ForEach-Object {
-            if ($_.CommandLine -match '(?:^|\s)--hub-port=(\d+)(?:\s|$)') { 'http://127.0.0.1:' + $Matches[1] }
+            if ($_.CommandLine -match '(?:^|\s)--hub-port(?:=|\s+)(\d+)(?:\s|$)') { 'http://127.0.0.1:' + $Matches[1] }
         } | Sort-Object -Unique)
     }
-    if ($backendUrls.Count -eq 0) { throw 'Open CCS21 and the Antigravity panel first, then rerun. No running agy backend was found; no files changed.' }
+    if ($backendUrls.Count -gt 1) { Write-Host 'Multiple local agy backends found; checking each. Use -BackendUrl to check one specific session.' }
+    if ($backendUrls.Count -eq 0) { Write-Host 'No backend address available. Install-time backend check pending; the adapter checks it when the panel opens.' }
     $probeFile = Join-Path ([IO.Path]::GetTempPath()) ('ccs21-antigravity-check-' + [Guid]::NewGuid().ToString('N') + '.cjs')
     try {
-        [IO.File]::WriteAllText($probeFile,$adapter,$utf8)
+        [IO.File]::WriteAllText((IOPath $probeFile),$adapter,$utf8)
+        & $nodeExe --check $probeFile
+        if ($LASTEXITCODE -ne 0) { throw 'Bundled Node.js cannot parse this adapter. No files changed.' }
+        $syntaxFile = [IO.Path]::ChangeExtension($probeFile,'.js')
+        try {
+            [IO.File]::WriteAllText((IOPath $syntaxFile),$patched,$utf8)
+            & $nodeExe --check $syntaxFile
+            if ($LASTEXITCODE -ne 0) { throw 'Patched extension syntax check failed. No files changed.' }
+        } finally { if ([IO.File]::Exists((IOPath $syntaxFile))) { [IO.File]::Delete((IOPath $syntaxFile)) } }
         foreach ($binary in @($backendProcesses | ForEach-Object { $_.ExecutablePath } | Where-Object { $_ } | Sort-Object -Unique)) {
             # Installed and running versions may differ after an update.
             $installedVersion = (& $nodeExe $probeFile --binary-version $binary) -join ''
@@ -551,11 +748,11 @@ if (-not $Restore) {
             $backendChecks += [PSCustomObject]@{ url=$url; version=$probe.version; mode=$probe.mode; sha256=$probe.sha256 }
             Write-Host ('Verified running agy ' + $probe.version + ' (' + $probe.mode + '), frontend: ' + $probe.sha256)
         }
-    } finally { if (Test-Path -LiteralPath $probeFile) { Remove-Item -LiteralPath $probeFile } }
+    } finally { if ([IO.File]::Exists((IOPath $probeFile))) { [IO.File]::Delete((IOPath $probeFile)) } }
 }
 if ($CheckOnly) {
-    if ($alreadyPatched -and -not (Test-Path -LiteralPath $helperFile)) { throw 'Patched entry point is missing its adapter. Run repair.' }
-    $adapterCurrent = (Test-Path -LiteralPath $helperFile) -and ((FileHash $helperFile) -eq (TextHash $adapter))
+    if ($alreadyPatched -and -not ([IO.File]::Exists((IOPath $helperFile)))) { throw 'Patched entry point is missing its adapter. Run repair.' }
+    $adapterCurrent = ([IO.File]::Exists((IOPath $helperFile))) -and ((FileHash $helperFile) -eq (TextHash $adapter))
     Write-Host ('Compatible Antigravity ' + $package.version + '. Current adapter installed: ' + ($alreadyPatched -and $adapterCurrent -and -not $legacyPatched))
     if ($alreadyPatched -and ($legacyPatched -or -not $adapterCurrent)) { Write-Host 'Legacy adapter found. Run repair to enable automatic update compatibility.' }
     Write-Host ('Extension: ' + $ExtensionDir)
@@ -563,67 +760,80 @@ if ($CheckOnly) {
 }
 # Prepare every byte and validate the original before altering the installation.
 if (-not $Restore) {
-    if (-not (Test-Path -LiteralPath $backupDir)) { New-Item -ItemType Directory -Path $backupDir | Out-Null }
-    if (Test-Path -LiteralPath $backupFile) {
+    # Fail on an unwritable report location before touching the extension.
+    [IO.Directory]::CreateDirectory((IOPath $ReportDir)) | Out-Null
+    $reportProbe = Join-Path $ReportDir ('.write-check-' + [Guid]::NewGuid().ToString('N'))
+    [IO.File]::WriteAllText((IOPath $reportProbe),'',$utf8)
+    [IO.File]::Delete((IOPath $reportProbe))
+    if (-not (Test-Path -LiteralPath $backupDir)) { [IO.Directory]::CreateDirectory((IOPath $backupDir)) | Out-Null }
+    if ([IO.File]::Exists((IOPath $backupFile))) {
         if ((FileHash $backupFile) -ne $originalHash) { throw 'Existing backup does not match the original.' }
-    } else { [IO.File]::WriteAllText($backupFile,$original,$utf8) }
+    } else { [IO.File]::WriteAllBytes((IOPath $backupFile),$originalBytes) }
     $snapshotDir = Join-Path $backupDir ([DateTime]::Now.ToString('yyyyMMdd-HHmmss-fff'))
-    New-Item -ItemType Directory -Path $snapshotDir | Out-Null
-    Copy-Item -LiteralPath $entryFile -Destination (Join-Path $snapshotDir 'extension.js.before')
+    [IO.Directory]::CreateDirectory((IOPath $snapshotDir)) | Out-Null
+    [IO.File]::Copy((IOPath $entryFile),(IOPath (Join-Path $snapshotDir 'extension.js.before')))
     $previousHelper = $null
-    if (Test-Path -LiteralPath $helperFile) {
-        $previousHelper = [IO.File]::ReadAllBytes($helperFile)
-        Copy-Item -LiteralPath $helperFile -Destination (Join-Path $snapshotDir 'proxy.cjs.before')
+    if ([IO.File]::Exists((IOPath $helperFile))) {
+        $previousHelper = [IO.File]::ReadAllBytes((IOPath $helperFile))
+        [IO.File]::Copy((IOPath $helperFile),(IOPath (Join-Path $snapshotDir 'proxy.cjs.before')))
     }
+    $previousManifest = $null
+    if ([IO.File]::Exists((IOPath $manifestFile))) {
+        $previousManifest = [IO.File]::ReadAllBytes((IOPath $manifestFile))
+        [IO.File]::Copy((IOPath $manifestFile),(IOPath (Join-Path $snapshotDir 'installed.json.before')))
+    }
+    if ((FileHash $entryFile) -ne $currentHash) { throw 'Extension changed during preflight. Rerun repair.' }
     try {
-        [IO.File]::WriteAllText($helperFile,$adapter,$utf8)
-        [IO.File]::WriteAllText($entryFile,$patched,$utf8)
+        [IO.File]::WriteAllText((IOPath $helperFile),$adapter,$utf8)
+        [IO.File]::WriteAllText((IOPath $entryFile),$patched,$utf8)
         if ((FileHash $entryFile) -ne (TextHash $patched) -or (FileHash $helperFile) -ne (TextHash $adapter)) { throw 'Patch verification failed.' }
-        [PSCustomObject]@{ toolVersion=$toolVersion; extensionVersion=$package.version; originalFile=$backupFile; originalSha256=$originalHash; patchedSha256=(TextHash $patched); adapterSha256=(TextHash $adapter) } | ConvertTo-Json | Set-Content -LiteralPath $manifestFile -Encoding UTF8
+        $manifestJson = [PSCustomObject]@{ toolVersion=$toolVersion; extensionVersion=$package.version; originalFile=$backupFile; originalSha256=$originalHash; patchedSha256=(TextHash $patched); adapterSha256=(TextHash $adapter) } | ConvertTo-Json
+        [IO.File]::WriteAllText((IOPath $manifestFile),$manifestJson,$utf8)
     } catch {
-        [IO.File]::WriteAllText($entryFile,$current,$utf8)
-        if ($null -ne $previousHelper) { [IO.File]::WriteAllBytes($helperFile,$previousHelper) }
-        elseif (Test-Path -LiteralPath $helperFile) { Remove-Item -LiteralPath $helperFile }
+        [IO.File]::WriteAllBytes((IOPath $entryFile),$currentBytes)
+        if ($null -ne $previousHelper) { [IO.File]::WriteAllBytes((IOPath $helperFile),$previousHelper) }
+        elseif ([IO.File]::Exists((IOPath $helperFile))) { [IO.File]::Delete((IOPath $helperFile)) }
+        if ($null -ne $previousManifest) { [IO.File]::WriteAllBytes((IOPath $manifestFile),$previousManifest) }
+        elseif ([IO.File]::Exists((IOPath $manifestFile))) { [IO.File]::Delete((IOPath $manifestFile)) }
         throw
     }
-    New-Item -ItemType Directory -Force -Path $ReportDir | Out-Null
+    [IO.Directory]::CreateDirectory((IOPath $ReportDir)) | Out-Null
     $reportFile = Join-Path $ReportDir ('repair-' + [DateTime]::Now.ToString('yyyyMMdd-HHmmss-fff') + '.json')
-    [PSCustomObject]@{ toolVersion=$toolVersion; extension=$ExtensionDir; extensionVersion=$package.version; installed=$true; installedBackendVersions=$binaryVersions; backendChecks=$backendChecks; uiVerified=$false; status='installed-reload-required'; backup=$snapshotDir } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $reportFile -Encoding UTF8
-    Write-Host ('Adapter ' + $toolVersion + ' installed; running backend compatibility verified. Backup: ' + $snapshotDir) -ForegroundColor Green
+    $reportJson = [PSCustomObject]@{ toolVersion=$toolVersion; extension=$ExtensionDir; entryFile=$entryFile; ccsExecutable=$CcsExe; extensionVersion=$package.version; installed=$true; installedBackendVersions=$binaryVersions; backendChecks=$backendChecks; backendVerified=($backendChecks.Count -gt 0); uiVerified=$false; status='installed-reload-required'; backup=$snapshotDir } | ConvertTo-Json -Depth 5
+    [IO.File]::WriteAllText((IOPath $reportFile),$reportJson,$utf8)
+    Write-Host ('Adapter ' + $toolVersion + ' installed. Backend verified: ' + ($backendChecks.Count -gt 0) + '. Backup: ' + $snapshotDir) -ForegroundColor Green
     Write-Host 'UI verification is pending. Reload CCS21 and confirm the Antigravity panel opens.'
     Write-Host ('Report: ' + $reportFile)
 } elseif ($alreadyPatched) {
-    [IO.File]::WriteAllText($entryFile,$original,$utf8)
+    [IO.File]::WriteAllBytes((IOPath $entryFile),$originalBytes)
     if ((FileHash $entryFile) -ne $originalHash) { throw 'Restore verification failed.' }
-    if (Test-Path -LiteralPath $helperFile) { Remove-Item -LiteralPath $helperFile }
+    if ([IO.File]::Exists((IOPath $helperFile))) { [IO.File]::Delete((IOPath $helperFile)) }
     Write-Host 'Original extension.js restored and verified.' -ForegroundColor Green
 } else { Write-Host 'Original extension is already present.' }
 if ($NoRestart) { Write-Host 'In CCS use Developer: Reload Window to load the change.'; return }
 $running = @(Get-Process -Name ccstudio -ErrorAction SilentlyContinue | Where-Object {
-    $_.MainWindowHandle -ne 0 -and $_.Path -like '*\ccs21*\ccs\theia\ccstudio.exe'
+    $_.MainWindowHandle -ne 0 -and ($CcsExe -and $_.Path -ieq $CcsExe)
 })
 if ($running.Count -gt 1) { throw 'Multiple CCS21 windows are open. Reload each window manually.' }
 if ($running.Count -eq 1) {
+    $launch = @($processInventory | Where-Object { $_.ProcessId -eq $running[0].Id -and $_.CommandLine })
+    if ($launch.Count -ne 1 -or $launch[0].CommandLine -notmatch '^\s*(?:"[^"]+"|\S+)\s*(?<arguments>[\s\S]*)$') {
+        Write-Host 'Original launch arguments unavailable. Use Developer: Reload Window to retain your profile/workspace.'
+        return
+    }
+    $restartArguments = $Matches['arguments']
     if (-not $CcsExe) { $CcsExe = $running[0].Path }
     Write-Host 'Restarting CCS21. Save changes if CCS asks; no process will be force-killed.'
     if (-not $running[0].CloseMainWindow()) { throw 'CCS did not accept a graceful close. Use Developer: Reload Window.' }
     if (-not $running[0].WaitForExit(30000)) { throw 'CCS is still open, possibly awaiting Save. Complete that dialog, then restart CCS.' }
 }
-if ($running.Count -eq 0 -and @(Get-Process -Name ccstudio -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*\ccs21*\ccs\theia\ccstudio.exe' }).Count -gt 0) {
-    Write-Host 'CCS21 is running but its window cannot be identified. Use Developer: Reload Window; no duplicate CCS instance was started.'
+if ($running.Count -eq 0) {
+    Write-Host 'Open or reload the selected CCS installation to load the change. No duplicate instance was started.'
     return
 }
-if (-not $CcsExe) {
-    $executables = @(Get-PSDrive -PSProvider FileSystem | ForEach-Object {
-        $tiRoot = Join-Path $_.Root 'ti'
-        if (Test-Path -LiteralPath $tiRoot) {
-            Get-ChildItem -LiteralPath $tiRoot -Directory -Filter 'ccs21*' | ForEach-Object {
-                $exe = Join-Path $_.FullName 'ccs\theia\ccstudio.exe'
-                if (Test-Path -LiteralPath $exe) { $exe }
-            }
-        }
-    })
-    if ($executables.Count -eq 1) { $CcsExe = $executables[0] }
+if ($CcsExe -and ([IO.File]::Exists((IOPath $CcsExe)))) {
+    if ($restartArguments) { Start-Process -FilePath $CcsExe -ArgumentList $restartArguments -WindowStyle Hidden }
+    else { Start-Process -FilePath $CcsExe -WindowStyle Hidden }
 }
-if ($CcsExe -and (Test-Path -LiteralPath $CcsExe)) { Start-Process -FilePath $CcsExe -WindowStyle Hidden }
 else { Write-Host 'Repair complete. Open CCS21 manually.' }
+
