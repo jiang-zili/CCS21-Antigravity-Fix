@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal DisableDelayedExpansion
 if not exist "%~dp0Fix-CCS21-Antigravity.ps1" (
   echo Missing Fix-CCS21-Antigravity.ps1. Extract the complete ZIP first.
   pause
@@ -13,3 +13,4 @@ if errorlevel 1 (
 )
 echo Script finished. Read the installation and reload status above.
 pause
+
