@@ -1,132 +1,154 @@
 'use strict';
-const assert = require('node:assert/strict');
-const http = require('node:http');
-const crypto = require('node:crypto');
-const vm = require('node:vm');
-const { createCcsEmbedProxy, adaptAgyMainJs, getTheiaWebviewOrigin, inspectAgyMainJs, checkBackend, getProxyUrl } = require('./ccs21-antigravity-proxy.cjs');
-const origin = 'http://test-view.webview.localhost:62181';
-function get(url, headers = {}) {
-  return new Promise((resolve,reject) => {
-    http.get(url,{headers},res=>{
-      const chunks=[];
-      res.on('data',c=>chunks.push(c));
+const assert=require('node:assert/strict');
+const http=require('node:http');
+const fs=require('node:fs');
+const path=require('node:path');
+const os=require('node:os');
+const vm=require('node:vm');
+const Module=require('node:module');
+const zlib=require('node:zlib');
+const adapter=require('./ccs21-antigravity-proxy.cjs');
+const origin='http://test-view.webview.localhost:62181';
+function samplePredicate(value,expected=window.location.origin) {
+  if(!value||value==='null')return false;
+  if(value===expected||value.startsWith('vscode-webview://')||value.startsWith('vscode-file://'))return true;
+  try {
+    let parsed=new URL(value);
+    if(parsed.protocol!=='http:'&&parsed.protocol!=='https:')return false;
+    const host=parsed.hostname;
+    return host==='localhost'||host==='127.0.0.1'||host==='[::1]'||host==='::1'?true:
+      parsed.protocol==='https:'?(host.endsWith('.google.com')||host.endsWith('.googleplex.com')):false;
+  } catch{return false;}
+}
+const fixture=samplePredicate.toString();
+function evaluatePredicate(source) {
+  return vm.runInNewContext('('+source+')',{window:{location:{origin:'http://127.0.0.1:123'}},URL},{timeout:100});
+}
+function request(url,options={},body) {
+  return new Promise((resolve,reject)=>{
+    const req=http.request(url,options,res=>{
+      const chunks=[];res.on('data',chunk=>chunks.push(chunk));res.on('error',reject);
       res.on('end',()=>resolve({status:res.statusCode,headers:res.headers,body:Buffer.concat(chunks)}));
-      res.on('error',reject);
-    }).on('error',reject);
+    });
+    req.on('error',reject);req.end(body);
   });
 }
+async function eventually(check) {
+  for(let attempt=0;attempt<100;attempt++){if(check())return;await new Promise(resolve=>setTimeout(resolve,20));}
+  assert.fail('Asynchronous Webview did not update.');
+}
 async function main() {
-  assert.equal(getTheiaWebviewOrigin({asWebviewUri:()=>new URL(origin+'/asset')},{}),origin);
-  for (const bad of ['https://evil.example','http://*.webview.localhost:8000','http://test-view.webview.localhost:80/path','http://127.0.0.1:8000']) {
-    assert.throws(()=>getTheiaWebviewOrigin({asWebviewUri:()=>({toString:()=>bad})},{}));
+  const variants=[fixture,
+    fixture.replace(/samplePredicate/g,'newName_2027').replace(/\bvalue\b/g,'callerOrigin').replace(/\bexpected\b/g,'otherOrigin').replace(/\bparsed\b/g,'serverAddress').replace(/\bhost\b/g,'hostName'),
+    fixture.replace(/^function samplePredicate/,'').replace(') {',') => {'),
+    fixture.replace(/return false/g,'return !1').replace(/return true/g,'return !0').replace(/const host/g,'var host'),
+  ];
+  const cases=[origin,'http://other.webview.localhost:62181','https://evil.example','https://evil.google.com.evil.example','null',null,'http://127.0.0.1:9','vscode-webview://abc','https://docs.google.com'];
+  for(const source of variants) {
+    const before=evaluatePredicate(source);
+    const result=adapter.adaptAgyMainJs(Buffer.from(source),origin).toString();
+    const after=evaluatePredicate(result);
+    for(const value of cases)assert.equal(after(value),value===origin?true:before(value));
   }
-  const fixture = Buffer.from('function UNc(a,b=window.location.origin){if(!a||a==="null")return!1;return a===b}');
-  const fixtureHash = crypto.createHash('sha256').update(fixture).digest('hex');
-  assert.throws(()=>adaptAgyMainJs(fixture,origin),/Unsupported agy origin-check structure/);
-  const profiles = { [fixtureHash]: { version:'fixture-1.4.2', guard:'function UNc(a,b=window.location.origin){if(!a||a==="null")return!1;' } };
-  const adapted = adaptAgyMainJs(fixture,origin,profiles).toString();
-  const sandbox = {window:{location:{origin:'http://127.0.0.1:8'}}};
-  vm.runInNewContext(adapted,sandbox);
-  assert.equal(sandbox.UNc(origin),true);
-  assert.equal(sandbox.UNc('http://other.webview.localhost:62181'),false);
-  assert.equal(sandbox.UNc('https://evil.example'),false);
-  assert.equal(sandbox.UNc('null'),false);
-  const fixture143 = Buffer.from(fixture.toString().replace('UNc','PQc'));
-  const hash143 = crypto.createHash('sha256').update(fixture143).digest('hex');
-  const profiles143 = { [hash143]: { version:'fixture-1.4.3', guard:'function PQc(a,b=window.location.origin){if(!a||a==="null")return!1;' } };
-  const sandbox143 = {window:{location:{origin:'http://127.0.0.1:8'}}};
-  vm.runInNewContext(adaptAgyMainJs(fixture143,origin,profiles143).toString(),sandbox143);
-  assert.equal(sandbox143.PQc(origin),true);
-  assert.equal(sandbox143.PQc('http://other.webview.localhost:62181'),false);
-  assert.equal(inspectAgyMainJs(fixture143,profiles143).version,'fixture-1.4.3');
-  assert.throws(()=>inspectAgyMainJs(Buffer.concat([fixture143,Buffer.from(' ')]),profiles143),/Unsupported agy origin-check structure/);
-  const future = Buffer.from('function renamedGuard(x,y=window.location.origin){if(!x||x==="null")return!1;' +
-    'if(x===y||x.startsWith("vscode-webview://")||x.startsWith("vscode-file://"))return!0;' +
-    'try{let z=new URL(x);if(z.protocol!=="http:"&&z.protocol!=="https:")return!1;let h=z.hostname;' +
-    'return h==="localhost"||h==="127.0.0.1"||h==="[::1]"||h==="::1"?!0:z.protocol==="https:"?' +
-    'h.endsWith(".google.com")||h.endsWith(".future-google.example"):!1}catch{return!1}}');
-  assert.equal(inspectAgyMainJs(future).mode,'structure-verified');
-  const futureSandbox={window:{location:{origin:'http://127.0.0.1:8'}},URL};
-  vm.runInNewContext(adaptAgyMainJs(future,origin).toString(),futureSandbox);
-  assert.equal(futureSandbox.renamedGuard(origin),true);
-  for (const denied of ['http://other.webview.localhost:62181','https://evil.example','null','']) {
-    assert.equal(futureSandbox.renamedGuard(denied),false);
+  assert.throws(()=>adapter.inspectAgyMainJs(Buffer.from(fixture+';'+fixture.replace('samplePredicate','secondGuard'))),/found 2/);
+  assert.throws(()=>adapter.inspectAgyMainJs(Buffer.from(fixture.replace('return false','return true'))),/found 0/);
+  assert.throws(()=>adapter.inspectAgyMainJs(Buffer.from('/* '+fixture+' */')),/found 0/);
+  assert.equal(adapter.inspectAgyMainJs(Buffer.from('/* '+fixture+' */\n'+fixture)).mode,'ast-verified');
+  assert.throws(()=>adapter.inspectAgyMainJs(Buffer.from('const data=`'+fixture+'`;')),/found 0/);
+  for(const bad of ['https://evil.example','http://*.webview.localhost:8000','http://127.0.0.1:8','http://user@test.webview.localhost:8']) {
+    assert.throws(()=>adapter.getTheiaWebviewOrigin({asWebviewUri:()=>({toString:()=>bad})},{}));
   }
-  assert.equal(futureSandbox.renamedGuard('https://www.google.com'),true);
-  const formatted = Buffer.from(future.toString().replace('function renamedGuard(x,y=window.location.origin){',
-    'function renamedGuard ( x , y = window.location.origin ) {\n')
-    .replace(/"([^"\\]*)"/g,"'$1'").replace(/!1/g,'false').replace(/!0/g,'true')
-    .replace(/let /g,'const ').replace('}catch{returnfalse}}','} catch { return false; } }')
-    .replace(/returnfalse/g,'return false').replace(/returntrue/g,'return true'));
-  assert.equal(inspectAgyMainJs(formatted).mode,'structure-verified');
-  const formattedSandbox={window:{location:{origin:'http://127.0.0.1:8'}},URL};
-  vm.runInNewContext(adaptAgyMainJs(formatted,origin).toString(),formattedSandbox);
-  assert.equal(formattedSandbox.renamedGuard(origin),true);
-  assert.equal(formattedSandbox.renamedGuard('https://evil.example'),false);
-  assert.equal(formattedSandbox.renamedGuard('null'),false);
-  assert.throws(()=>inspectAgyMainJs(Buffer.concat([future,future])),/found 2/);
-  assert.throws(()=>inspectAgyMainJs(Buffer.from(future.toString().replace('if(!x||x==="null")return!1;','if(!x||x==="null")return!0;'))),/found 0/);
-  let servedMain = fixture;
+  for(const allowed of [origin,'http://test.webview.localhost','https://test.webview.localhost:443']) {
+    assert.equal(adapter.getTheiaWebviewOrigin({asWebviewUri:()=>new URL(allowed+'/asset')},{}),new URL(allowed).origin);
+  }
+  let rootMode='hashed';
   const backend=http.createServer((req,res)=>{
-    if(req.url==='/') {
-      res.setHeader('Content-Type','text/html');
-      res.setHeader('Content-Security-Policy',"default-src 'self'; frame-ancestors 'self' http://localhost:*; script-src 'self'");
-      res.end('<html>ok</html>');
-    } else if(req.url==='/main.js') {
-      res.setHeader('Content-Type','application/javascript');res.end(servedMain);
-    } else { res.setHeader('X-Auth-Echo',req.headers['x-codeium-csrf-token']||''); req.pipe(res); }
+    const pathname=new URL(req.url,'http://localhost').pathname;
+    if(pathname==='/') {
+      res.setHeader('Content-Type','text/html');res.setHeader('Content-Security-Policy',"default-src 'self'; frame-ancestors 'self' http://localhost:*; script-src 'self'");
+      res.end('<script type="module" src="'+(rootMode==='import'?'/assets/bootstrap.js':'/assets/client-abcdef.mjs?build=2027')+'"></script>');
+    } else if(pathname==='/assets/bootstrap.js') {res.setHeader('Content-Type','text/javascript');res.end('import "./client-abcdef.mjs";');}
+    else if(pathname==='/assets/client-abcdef.mjs') {res.setHeader('Content-Type','text/javascript');res.end(fixture);}
+    else if(pathname==='/compressed.js') {res.setHeader('Content-Type','application/javascript');res.setHeader('Content-Encoding','gzip');res.end(zlib.gzipSync(fixture));}
+    else if(pathname==='/unrelated.js') {res.setHeader('Content-Type','application/javascript');res.end('console.log("unrelated asset")');}
+    else if(pathname==='/bad.js') {res.setHeader('Content-Type','application/javascript');res.end(fixture.replace('return false','return true'));}
+    else if(pathname==='/echo') {res.setHeader('X-Auth-Echo',req.headers.authorization||'');res.setHeader('X-CSRF-Echo',req.headers['x-codeium-csrf-token']||'');req.pipe(res);}
+    else {res.statusCode=404;res.end('missing');}
   });
   backend.on('upgrade',(req,socket)=>{
     assert.equal(req.headers['x-codeium-csrf-token'],'test-token');
-    socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
-    socket.pipe(socket);
+    if(req.url==='/reject'){socket.end('HTTP/1.1 403 Forbidden\r\nContent-Length: 6\r\n\r\ndenied');return;}
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');socket.pipe(socket);
   });
-  await new Promise(r=>backend.listen(0,'127.0.0.1',r));
+  await new Promise(resolve=>backend.listen(0,'127.0.0.1',resolve));
   const backendUrl='http://127.0.0.1:'+backend.address().port;
-  const proxy=await createCcsEmbedProxy({backendUrl,allowedOrigin:origin});
+  const proxy=await adapter.createCcsEmbedProxy({backendUrl,allowedOrigin:origin});
+  const context={extensionUri:{},subscriptions:[]};
   try {
-    await assert.rejects(checkBackend(backendUrl),/Unsupported agy origin-check structure/);
-    const context={subscriptions:[]};
-    await assert.rejects(getProxyUrl(backendUrl,origin,context),/Unsupported agy origin-check structure/);
-    assert.equal(context.subscriptions.length,0);
-    const root=await get(proxy.url+'/');
-    assert.equal(root.status,200);
-    assert.equal(root.headers['content-security-policy'],"default-src 'self'; frame-ancestors 'self' http://localhost:* "+origin+" file:; script-src 'self'");
-    const echo=await get(proxy.url+'/echo',{'x-codeium-csrf-token':'test-token'});
-    assert.equal(echo.headers['x-auth-echo'],'test-token');
-    assert.equal((await get(proxy.url+'/main.js')).status,502);
-    servedMain = future;
-    assert.equal((await checkBackend(backendUrl)).mode,'structure-verified');
-    const futureResponse=await get(proxy.url+'/main.js');
-    assert.equal(futureResponse.status,200);
-    assert.deepEqual(futureResponse.body,adaptAgyMainJs(future,origin));
+    assert.equal((await adapter.checkBackend(backendUrl)).scriptPath,'/assets/client-abcdef.mjs?build=2027');
+    rootMode='import';assert.equal((await adapter.checkBackend(backendUrl)).scriptPath,'/assets/client-abcdef.mjs');rootMode='hashed';
+    const html=await request(proxy.url+'/');
+    assert.equal(html.status,200);assert.equal(html.headers['content-security-policy'],"default-src 'self'; frame-ancestors 'self' http://localhost:* "+origin+" file:; script-src 'self'");
+    const liveScript=await request(proxy.url+'/assets/client-abcdef.mjs?build=2027');
+    assert.deepEqual(liveScript.body,adapter.adaptAgyMainJs(Buffer.from(fixture),origin));
+    assert.equal(liveScript.headers['cache-control'],'no-store');
+    const compressed=await request(proxy.url+'/compressed.js');assert.equal(compressed.status,200);assert.equal(compressed.headers['content-encoding'],undefined);assert.deepEqual(compressed.body,liveScript.body);
+    assert.equal((await request(proxy.url+'/unrelated.js')).body.toString(),'console.log("unrelated asset")');
+    assert.equal((await request(proxy.url+'/bad.js')).status,502);
+    const echo=await request(proxy.url+'/echo',{method:'POST',headers:{authorization:'Bearer test-value','x-codeium-csrf-token':'test-token'}},'unchanged-body');
+    assert.equal(echo.headers['x-auth-echo'],'Bearer test-value');assert.equal(echo.headers['x-csrf-echo'],'test-token');assert.equal(echo.body.toString(),'unchanged-body');
     await new Promise((resolve,reject)=>{
       const req=http.get(proxy.url+'/ws',{headers:{Upgrade:'websocket',Connection:'Upgrade','x-codeium-csrf-token':'test-token'}});
-      req.on('upgrade',(res,socket)=>{
-        socket.write('test-payload');
-        socket.once('data',data=>{try {assert.equal(data.toString(),'test-payload');socket.destroy();resolve();}catch(e){reject(e);}});
-      });
-      req.on('error',reject);req.setTimeout(3000,()=>req.destroy(new Error('Upgrade timeout')));
+      req.on('upgrade',(res,socket)=>{socket.write('test-payload');socket.once('data',data=>{try{assert.equal(data.toString(),'test-payload');socket.destroy();resolve();}catch(error){reject(error);}});});req.on('error',reject);
     });
-  } finally { await proxy.dispose(); await new Promise(r=>backend.close(r)); }
-  if(process.argv[2]) {
-    const profile=await checkBackend(process.argv[2]);
-    assert.ok(['hash-pinned','structure-verified'].includes(profile.mode));
-    const live=await createCcsEmbedProxy({backendUrl:process.argv[2],allowedOrigin:origin});
+    assert.equal((await request(proxy.url+'/reject',{headers:{Upgrade:'websocket',Connection:'Upgrade','x-codeium-csrf-token':'test-token'}})).status,403);
+    let sidebar,custom,serializer;
+    const rawViews=[];
+    function rawView(theia=true) {
+      let html='';let disposed;
+      const webview=Object.freeze({get html(){return html;},set html(value){html=value;},asWebviewUri(){assert.equal(this,webview);return new URL(theia?origin+'/resource':'https://normal.vscode-cdn.example/resource');},postMessage(){assert.equal(this,webview);return true;}});
+      const view=Object.freeze({webview,onDidDispose(callback){disposed=callback;return {dispose(){}};},dispose(){if(disposed)disposed();}});
+      rawViews.push(view);return view;
+    }
+    class Uri {static joinPath(){return 'kept-static';}}
+    const realWindow=Object.freeze({registerWebviewViewProvider(id,provider){assert.equal(this,realWindow);sidebar=provider;return {dispose(){}};},registerCustomEditorProvider(id,provider){custom=provider;return {dispose(){}};},registerWebviewPanelSerializer(id,provider){serializer=provider;return {dispose(){}};},createWebviewPanel(){return rawView();}});
+    const api=Object.freeze({window:realWindow,Uri});
+    const wrapped=adapter.wrapVsCodeApi(api,()=>context);
+    assert.equal(wrapped.Uri,Uri);assert.equal(wrapped.Uri.joinPath(),'kept-static');
+    const provider={tag:7,resolveWebviewView(view){assert.equal(this.tag,7);view.webview.html='<iframe src="'+backendUrl+'/?extensionView=true"></iframe><script>const IFRAME_URL="'+backendUrl+'";</script>';view.webview.postMessage({});}};
+    wrapped.window.registerWebviewViewProvider('any-renamed-view',provider);
+    const raw=rawView();sidebar.resolveWebviewView(raw);
+    await eventually(()=>raw.webview.html.includes('iframe')&&!raw.webview.html.includes(backendUrl));
+    wrapped.window.registerCustomEditorProvider('settings',{resolveCustomTextEditor(document,panel){provider.resolveWebviewView.call(provider,panel);}});
+    const settings=rawView();custom.resolveCustomTextEditor({},settings);await eventually(()=>settings.webview.html.includes('iframe'));
+    wrapped.window.registerWebviewPanelSerializer('restored',{deserializeWebviewPanel(panel){provider.resolveWebviewView.call(provider,panel);}});
+    const restored=rawView();serializer.deserializeWebviewPanel(restored);await eventually(()=>restored.webview.html.includes('iframe'));
+    const native=rawView(false);sidebar.resolveWebviewView(native);assert(native.webview.html.includes(backendUrl));
+    const quick=wrapped.window.createWebviewPanel();quick.webview.html='<iframe src="'+backendUrl+'"></iframe>';quick.webview.html='<p>newer render</p>';await new Promise(resolve=>setTimeout(resolve,100));assert.equal(rawViews[rawViews.length-1].webview.html,'<p>newer render</p>');
+    const disposed=wrapped.window.createWebviewPanel();disposed.webview.html='<iframe src="'+backendUrl+'"></iframe>';disposed.dispose();await new Promise(resolve=>setTimeout(resolve,100));assert.equal(rawViews[rawViews.length-1].webview.html,'');
+    const temporary=fs.mkdtempSync(path.join(os.tmpdir(),'ccs-entry-test-'));
     try {
-      const [plain,result]=await Promise.all([get(process.argv[2]+'/main.js'),get(live.url+'/main.js')]);
-      const updatedBuild=Buffer.concat([plain.body,Buffer.from('\n// simulated backend build update\n')]);
-      assert.equal(inspectAgyMainJs(updatedBuild).mode,'structure-verified');
-      assert.ok(adaptAgyMainJs(updatedBuild,origin).includes(Buffer.from(JSON.stringify(origin))));
-      assert.equal(result.status,200);
-      assert.deepEqual(result.body,adaptAgyMainJs(plain.body,origin));
-      assert.equal(Number(result.headers['content-length']),result.body.length);
-      assert.equal(result.headers['cache-control'],'no-store');
-      assert.equal(result.headers.etag,undefined);
-      assert.equal((await get(live.url+'/')).status,200);
-    } finally {await live.dispose();}
+      const installed=path.join(temporary,'portable extension');fs.mkdirSync(path.join(installed,'dist'),{recursive:true});fs.mkdirSync(path.join(temporary,'node_modules/vscode'),{recursive:true});
+      global.__ccsMockApi=api;
+      fs.writeFileSync(path.join(temporary,'node_modules/vscode/index.js'),'module.exports=global.__ccsMockApi;');
+      fs.copyFileSync(path.join(__dirname,'ccs-antigravity-entry.cjs'),path.join(installed,'wrapper.cjs'));
+      fs.writeFileSync(path.join(installed,'ccs-antigravity-adapter.cjs'),'module.exports=require('+JSON.stringify(path.join(__dirname,'ccs21-antigravity-proxy.cjs'))+');');
+      fs.writeFileSync(path.join(installed,'.ccs-antigravity-state.json'),JSON.stringify({originalMain:'./dist/renamed-loader.cjs'}));
+      fs.writeFileSync(path.join(installed,'dist/renamed-loader.cjs'),'const api=require("vscode");exports.activate=ctx=>({api,ctx});exports.deactivate=()=>42;');
+      const previous=Module._load;
+      const entry=require(path.join(installed,'wrapper.cjs'));
+      const activeContext={extensionUri:{},subscriptions:[]};const activation=entry.activate(activeContext);
+      assert.equal(activation.ctx,activeContext);assert.notEqual(activation.api.window,realWindow);assert.equal(activation.api.Uri,Uri);
+      const outside=Module.createRequire(path.join(temporary,'unrelated-extension.cjs'));assert.equal(outside('vscode'),api);
+      assert.equal(entry.deactivate(),42);assert.equal(Module._load,previous);
+      entry.activate(activeContext);entry.deactivate();assert.equal(Module._load,previous);
+    } finally {delete global.__ccsMockApi;fs.rmSync(temporary,{recursive:true,force:true});}
+    if(process.argv[2]) {const live=await adapter.checkBackend(process.argv[2]);assert.equal(live.mode,'ast-verified');console.log('Live backend:',live.sha256);}
+  } finally {
+    for(const disposable of context.subscriptions)await disposable.dispose();
+    await proxy.dispose();await new Promise(resolve=>backend.close(resolve));
   }
-  console.log('PASS: known versions, simulated future update, renamed guard, CSP, auth, WebSocket, incompatible-structure rejection'+(process.argv[2]?', live agy':'')+'.');
+  if(fs.existsSync('.local/agy-1.4.2-main.js'))assert.equal(adapter.inspectAgyMainJs(fs.readFileSync('.local/agy-1.4.2-main.js')).mode,'ast-verified');
+  console.log('PASS: version-independent AST checks; hashed/module paths; CSP/auth/HTTP/WebSocket; frozen APIs; sidebar/custom editor/serializer/panel hooks; render races/disposal; scoped entry loader.');
 }
-main().catch(e=>{console.error(e);process.exitCode=1;});
-
+main().catch(error=>{console.error(error);process.exitCode=1;});
