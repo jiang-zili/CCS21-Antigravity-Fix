@@ -53,6 +53,17 @@ async function main() {
     assert.equal(futureSandbox.renamedGuard(denied),false);
   }
   assert.equal(futureSandbox.renamedGuard('https://www.google.com'),true);
+  const formatted = Buffer.from(future.toString().replace('function renamedGuard(x,y=window.location.origin){',
+    'function renamedGuard ( x , y = window.location.origin ) {\n')
+    .replace(/"([^"\\]*)"/g,"'$1'").replace(/!1/g,'false').replace(/!0/g,'true')
+    .replace(/let /g,'const ').replace('}catch{returnfalse}}','} catch { return false; } }')
+    .replace(/returnfalse/g,'return false').replace(/returntrue/g,'return true'));
+  assert.equal(inspectAgyMainJs(formatted).mode,'structure-verified');
+  const formattedSandbox={window:{location:{origin:'http://127.0.0.1:8'}},URL};
+  vm.runInNewContext(adaptAgyMainJs(formatted,origin).toString(),formattedSandbox);
+  assert.equal(formattedSandbox.renamedGuard(origin),true);
+  assert.equal(formattedSandbox.renamedGuard('https://evil.example'),false);
+  assert.equal(formattedSandbox.renamedGuard('null'),false);
   assert.throws(()=>inspectAgyMainJs(Buffer.concat([future,future])),/found 2/);
   assert.throws(()=>inspectAgyMainJs(Buffer.from(future.toString().replace('if(!x||x==="null")return!1;','if(!x||x==="null")return!0;'))),/found 0/);
   let servedMain = fixture;
@@ -118,3 +129,4 @@ async function main() {
   console.log('PASS: known versions, simulated future update, renamed guard, CSP, auth, WebSocket, incompatible-structure rejection'+(process.argv[2]?', live agy':'')+'.');
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});
+
