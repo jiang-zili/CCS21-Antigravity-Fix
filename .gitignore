@@ -1,4 +1,3 @@
 .local/
-*.zip
 AgentOutput/
-
+*.zip
