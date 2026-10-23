@@ -1,66 +1,68 @@
 # CCS21 Antigravity 一键修复
 
-修复 CCS21 左侧 Google Antigravity 显示 **Couldn't load this view** 的兼容性问题。
+修复 Windows CCS/Theia 中 Antigravity 的 `Couldn't load this view` 兼容问题。
 
-**v1.2.0：自动检测版本并按实际代码结构修复。** Antigravity 扩展与 agy 后端独立更新；扩展仍是 1.8.0 时，后端可能已经变成 1.4.3。旧版只支持固定前端哈希，导致“CMD 提示成功，页面仍打不开”。
+**v1.3.0：去除固定安装路径、配置编号和版本号限制，按实际文件结构检测。**
 
-在 **CCS 21.0.1 / Windows x64** 上实测 Antigravity 1.8.0、agy 1.4.2 和 1.4.3。版本号、压缩函数名、变量名或前端哈希变化不再直接拒绝修复：工具会检查实际兼容结构，并单独记录版本和 SHA-256。
-
-每次运行 CMD 都检测扩展版本、已安装 agy 版本以及实际运行的后端前端。每次新建页面代理和请求前端脚本时都重新判断后端兼容性，无需为了常规后端更新重新下载补丁。已知前端使用核对过的哈希规则；未知前端必须匹配完整的来源校验算法，唯一匹配后只增加当前页面的精确来源。
-
-官方扩展更新若覆盖了补丁文件，再运行同一个 `Run-Fix.cmd`，工具会重新检测渲染结构、保留更新后的原文件并重新适配。**不需要为单纯的版本号或压缩命名变化增加白名单。** 若更新改变了协议、渲染接口或完整校验算法，工具会报告具体不兼容结构，保留原文件；无法预先保证任意未来大改都兼容。
+[下载最新修复包](https://github.com/jiang-zili/CCS21-Antigravity-Fix/releases/latest) · [下载源码 ZIP](https://github.com/jiang-zili/CCS21-Antigravity-Fix/archive/refs/heads/main.zip)
 
 ## 使用
 
-1. [下载最新完整 ZIP](https://github.com/jiang-zili/CCS21-Antigravity-Fix/archive/refs/heads/main.zip) 并解压，不能只下载 CMD。
-2. 先打开 CCS21 和左侧 Antigravity，让 agy 启动；即使页面显示错误也可以继续。
-3. 双击 `Run-Fix.cmd`。脚本检查实际运行后端、保存备份、升级旧补丁，并尝试正常重启 CCS21。若出现保存提示，请自行保存。若提示无法定位窗口，在 CCS 命令面板执行 **Reload Window**。
-4. 确认左侧聊天输入框和 Antigravity Settings 可以打开。Google 的首次使用条款、数据收集选项和登录由本人处理。
+1. 下载 Release 中的 `CCS21-Antigravity-Fix-v1.3.0.zip`，完整解压。
+2. 建议先打开需要修复的 CCS 和 Antigravity，然后双击 `Run-Fix.cmd`。
+3. 找到唯一目标时自动处理；存在多个副本时选择正确目录；自动发现失败时通过文件选择窗口定位 `ccstudio.exe` 或包含 Google Antigravity `package.json` 的扩展目录。
+4. 修复完成后重载 CCS 窗口。只有能确认原启动进程及其参数时，脚本才尝试正常关闭并保留参数重启；否则提示执行 **Developer: Reload Window**。保存提示由本人处理。
 
-`Fix-CCS21-Antigravity.ps1` 内含全部适配代码，使用 CCS 自带的 Node.js 检查本地后端，修复过程可离线执行，不需要单独安装 Node.js 或重新下载扩展。正常安装不需要管理员权限。CMD 启动器仅为这次脚本进程设置执行策略，不改系统的永久执行策略。
+无需另外安装 Node.js，使用所选 CCS 自带的运行时。补丁和检查逻辑已嵌入单个 PS1，可离线运行。CMD 仅为本次进程设置执行策略。普通用户可写的扩展目录不需要管理员权限；受系统权限保护的目录仍需有写入权限。
 
-**输出含义：** “installed”表示文件安装及正在运行的后端兼容性检查通过，页面仍需重新加载确认。脚本不会把写入成功当成 UI 验证成功。报告保存在启动器目录的 `AgentOutput`，其中 `uiVerified` 保持 `false`，由实际页面验证另行确认。
+`Run-Check.cmd` 仅检查，`Run-Restore.cmd` 恢复备份。关闭 CCS 时也可安装；未检测到后端地址时，报告明确标记 `backendVerified: false`，首次打开页面由适配器检查实际后端。不要将“安装完成”当成页面或模型请求验证通过。
 
-也可直接运行：
+## 路径发现
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Fix-CCS21-Antigravity.ps1
-```
+- CCS 安装位置来自正在运行的程序、环境变量 `CCS_HOME` / `CCS_INSTALL_DIR` / `TI_CCS_ROOT`、卸载注册表、开始菜单/桌面快捷方式以及指定搜索根目录。根据 `ccstudio.exe`、相邻 `resources` 和自带 Node 的实际结构识别，不要求目录叫 `ccs21*`，没有固定盘符。
+- 扩展目录优先从 CCS 启动参数的 `--user-data-dir`、`--plugins`、`--extensions-dir` 获取，同时识别 Electron 配置的同级 Theia 目录；未发现时检查当前用户 CCS 配置位置。安装位置和配置位置独立处理。
+- 配置目录可以使用任意名称。扩展身份通过 `publisher=google`、`name=google-antigravity` 识别，入口读取 `package.main`，支持 `dist/entry.js` 等嵌套路径和省略 `.js` 的入口。
+- 支持中文、空格及 Windows 合法特殊字符路径。备份和文件写入使用 Windows 扩展路径形式，避免旧 PowerShell 在深目录下创建备份失败。路径仍须符合 Windows 文件系统、权限和 CCS 自身的要求。
+- 自动搜索限定在有关目录内、跳过链接循环；不会遍历整盘。任意深层位置可用 `-ExtensionDir` 直接指定，或以 `-ProfileDir` / `-SearchRoot` 提供较近的搜索起点。自动搜索深度为 6 层，CCS 安装搜索为 3 层，选择窗口不受搜索深度限制。
 
-仅检查兼容性与安装状态：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Fix-CCS21-Antigravity.ps1 -CheckOnly
-```
-
-恢复本次补丁前的原始扩展：
+例如，安装和配置均位于自定义目录时：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Fix-CCS21-Antigravity.ps1 -Restore
+.\Fix-CCS21-Antigravity.ps1 -CcsExe 'D:\Development Tools\IDE\ccs\theia\ccstudio.exe' -ProfileDir 'E:\CCS profiles\My profile' -NoRestart
 ```
 
-脚本查找所有数字编号配置目录。存在多个 CCS21 配置时，用 `-ExtensionDir` 指定包含 `package.json` 和 `extension.js` 的实际 `extension` 目录；不会猜测或修改所有副本。`-CcsExe` 可指定 CCS21 可执行文件；`-BackendUrl http://127.0.0.1:PORT` 可指定当前本机后端；`-NoRestart` 安装后保留现有进程，再执行 **Reload Window**。端口每次可能变化，不要复制旧端口。
-
-## 修复原理
-
-CCS21 使用 Theia 的 `http://<view-id>.webview.localhost:<port>` 承载扩展页面。当前 Antigravity 后端的 `frame-ancestors` 和前端消息来源校验没有包含这个来源。
-
-适配器从 `asWebviewUri` 获取当前视图的精确来源，在随机端口创建只监听 `127.0.0.1` 的代理。它为 HTML 的 `frame-ancestors` 增加该精确来源以及 Electron 父窗口所需的 `file:`，并在经过哈希或完整结构验证的 agy 前端中为这一来源增加消息校验分支。原有其他来源判断保留，HTTP、认证头、CSRF 头和 WebSocket 透传；扩展退出时关闭代理。
-
-原始 `extension.js` 和每次修改前的文件保存在扩展目录的 `AgentOutput/CCS21-Antigravity/<原始哈希前12位>/`，按完整 SHA-256 验证，避免不同版本备份混用，并兼容 Windows PowerShell 5.1 路径长度限制。升级时自动识别 v1 的原始备份，并保留旧适配器快照。`installed.json` 记录本次原文件、补丁和适配器哈希。恢复会核对原始哈希并移除本工具的适配文件；未知本地修改会被拒绝覆盖。工具不修改 agy.exe、用户工程、工作区和登录数据，不安装后台常驻服务。
-
-本项目是第三方兼容补丁，不是 TI 或 Google 的官方发布。只发布修复代码，不包含原始 Google 扩展包、账号数据、聊天记录或本机日志。
-
-## 验证与开发
-
-已检查 Windows PowerShell 5.1 语法、来源校验、CSP 保留、认证头透传、WebSocket 升级，以及真实 agy 1.4.2、1.4.3 前端。自动适配测试覆盖模拟新哈希、函数与参数改名、HTTPS 域名列表变化、重复或不兼容校验逻辑拒绝。隔离安装测试覆盖 v1 升级、重复运行、恢复、模拟官方更新覆盖补丁和模拟扩展版本 1.99.0。1.99.0 仅为测试夹具，并非宣称实测了尚未核对的官方发行版。恢复均核对原始哈希。重新加载本机 CCS21 后，1.4.3 聊天输入框、模型选择器和 Settings 页面已恢复显示；未发送模型请求。
-
-开发验证需要 Node.js：
+完全指定目标、禁止选择窗口，适合自动化：
 
 ```powershell
-& 'C:\ti\ccs2101\ccs\tools\node\node.exe' .\test-adapter.cjs
-# 可选：用当前运行的本机 agy 地址做真实前端验证
-& 'C:\ti\ccs2101\ccs\tools\node\node.exe' .\test-adapter.cjs http://127.0.0.1:PORT
+.\Fix-CCS21-Antigravity.ps1 -CcsExe 'D:\Tools\IDE' -ExtensionDir 'E:\Plugins\Antigravity\extension' -NonInteractive -NoRestart
 ```
 
-开发时保持 `Fix-CCS21-Antigravity.ps1` 与模板中嵌入的适配器一致。`Build-Script.ps1` 仅进行文本嵌入，不编译或构建 CCS 工程。本项目不包含 TI 工程构建操作。
+其他参数：`-CheckOnly`、`-Restore`、`-ReportDir`、`-SearchRoot`、`-BackendUrl http://127.0.0.1:PORT`。端口动态变化，应使用本轮正在运行的后端地址。多个后端默认逐个检查，可显式指定一个目标。
+
+## 版本兼容方式
+
+Antigravity 扩展与 agy 后端可以独立更新。**没有扩展版本号白名单，也不要求某个 agy 安装目录或固定端口。**
+
+脚本唯一匹配渲染方法，支持参数改名、已有 `async`、空白变化、省略日志，以及 `var` / `let` / `const` 和返回调用。写入前由 CCS Node 检查补丁语法。
+
+后端已知前端使用核对过的哈希规则；未知版本必须完整匹配来源校验算法。兼容压缩符号改名、空白、引号风格、布尔值写法和域名列表变化，每次新建页面代理和请求前端脚本时重新检查，只增加当前 Theia 页面精确来源，保留原判断、CSP、认证头和 WebSocket 转发。
+
+**这实现的是路径自由和按结构适配，不是对任意历史或未来协议的保证。** 若版本更改了渲染接口、协议或来源校验算法，工具会报告不兼容；不会为了显示“成功”删除校验或下载其他版本替代。首次安装预检不兼容时保留扩展原文件；运行中更新到不兼容后端时，代理拒绝加载未验证的前端。
+
+官方扩展更新覆盖补丁后，重新运行同一个启动器即可检测新入口、保存新原件并重新适配。
+
+## 备份与报告
+
+扩展原件和每次变更前快照保存在扩展目录的 `AgentOutput/CCS21-Antigravity/<原件哈希前12位>/`，完整 SHA-256 验证，保留原始字节、BOM 和换行。嵌套入口的适配器放在入口同级。`installed.json` 记录原件、补丁和适配器哈希；支持 v1.2 升级、重复运行、更新后的新原件和恢复。
+
+安装报告默认在启动器同级 `AgentOutput`，分别记录安装路径、入口、后端检查和 `uiVerified: false`。`-CheckOnly` 不写安装文件和报告，语法及后端检查只使用完成后清理的临时文件。未知本地改动不会被覆盖。工具不修改 `agy.exe`、工程、工作区、登录数据或 CCS 工程配置。
+
+## 本版验证
+
+Windows PowerShell 5.1 隔离测试覆盖自定义 CCS 根目录、中文/空格/括号/方括号/感叹号路径、非数字配置、嵌套入口、超过传统 MAX_PATH 的备份文件、已有 async、重复/未知接口拒绝、只读检查、安装、重复运行、更新后重装、逐字节恢复及本地修改保护。`99.42.0-future` 是测试夹具，用于确认版本号不被硬编码，不是官方实测发行版。
+
+代理测试覆盖已知规则、模拟未来版本、改名及格式变化、精确来源、CSP、认证头和 WebSocket。另在本机已安装 agy 1.4.5 的环境下，对运行后端进行了只读协议检查和代理测试；未知前端按结构及哈希记录，不将磁盘版本直接等同于运行版本。**本版未覆盖所有 Antigravity 发行版，未在真实 CCS 安装中应用补丁后重启验证页面，也未发送模型请求。**
+
+开发时使用 CCS 自带 Node 运行 `test-adapter.cjs`；`test-installer.ps1 -NodeExe <CCS自带node.exe> -BackendUrl <本地夹具地址>` 测试隔离安装。`test-backend.cjs` 提供仅监听本机的协议夹具。`Build-Script.ps1` 仅将适配器及发现函数嵌入 PS1，是文本生成器，不涉及编译、链接或 CCS 工程构建。
+
+本项目是第三方兼容补丁，不是 TI 或 Google 官方发布。发布包仅含本项目修复代码和文档。
