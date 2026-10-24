@@ -20,7 +20,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
-$toolVersion = '2.0.0'
+$toolVersion = '2.0.1'
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 $adapter = @'
 __EMBED_ADAPTER__
