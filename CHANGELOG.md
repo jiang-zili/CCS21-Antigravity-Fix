@@ -1,3 +1,8 @@
+# v2.0.1
+
+- Recognize the reviewed backend origin guard with configured allowedDomains while preserving its entire validation algorithm.
+- Add regression coverage for the new guard and reject modified validation.
+
 # 更新记录
 
 ## v2.0.0
