@@ -88,6 +88,9 @@ function canonicalGuard(fn) {
   }
   return {shape:JSON.stringify(normalize(fn.body)),valueName:first.name};
 }
+// Reviewed backend guard with configured allowedDomains; preserve its full algorithm.
+const CONFIGURED_DOMAIN_GUARD = "function NTc(a,b=window.location.origin){if(!a||a===\"null\")return!1;if(a===b||a.startsWith(\"vscode-webview://\")||a.startsWith(\"vscode-file://\"))return!0;try{let k=new URL(a);if(k.protocol!==\"http:\"&&k.protocol!==\"https:\")return!1;let l=k.hostname;if(l===\"localhost\"||l===\"127.0.0.1\"||l===\"[::1]\"||l===\"::1\")var c=!0;else{if(k.protocol===\"https:\"){var d;if(!(d=l.endsWith(\".google.com\")||l.endsWith(\".googleplex.com\")||l.endsWith(\".googlers.com\")||l.endsWith(\".googleprod.com\")||l.endsWith(\".cloudworkstations.dev\")||l.endsWith(\".cloudworkstations.googleusercontent.com\")||\nl.endsWith(\".cloudshell.dev\")||l.endsWith(\".cloudshell.googleusercontent.com\")))a:{var f=typeof window!==\"undefined\"?window.__APP_CONFIG__?.allowedDomains:void 0;if(f?.length){var g=l.toLowerCase();for(let m of f){let n=m.trim().toLowerCase().replace(/^\\*\\./,\"\").replace(/^\\.+|\\.+$/g,\"\");if(n&&n.includes(\".\")&&!n.includes(\"*\")&&(g===n||g.endsWith(`.${n}`))){d=!0;break a}}}d=!1}var h=d}else h=!1;c=h}return c}catch{return!1}}";
+const configuredDomainShape = canonicalGuard(acorn.parseExpressionAt(CONFIGURED_DOMAIN_GUARD,0,{ecmaVersion:"latest"})).shape;
 const expectedShape = canonicalGuard(acorn.parseExpressionAt(EXPECTED_GUARD,0,{ecmaVersion:'latest'})).shape;
 
 // Parse only candidate functions, not a 10-30 MB application AST. Whitespace,
@@ -107,7 +110,7 @@ function discoverOriginGuard(text) {
       try {fn = acorn.parseExpressionAt(text,at,{ecmaVersion:'latest'});} catch {continue;}
       if (fn.end < anchor.index || fn.end-anchor.index > 8192) continue;
       const profile = canonicalGuard(fn);
-      if (!profile || profile.shape !== expectedShape) continue;
+      if (!profile || profile.shape !== expectedShape && profile.shape !== configuredDomainShape) continue;
       found.set(at,{bodyStart:fn.body.start+1,functionStart:fn.start,functionEnd:fn.end,valueName:profile.valueName});
     }
   }
