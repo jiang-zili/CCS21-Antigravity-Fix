@@ -84,7 +84,8 @@ $null=InvokeRepair @('-ExtensionDir',$legacy.root,'-Restore')
 Assert ([IO.File]::ReadAllText((Join-Path $legacy.root 'package.json')) -eq $legacy.manifest) 'Legacy restore used a patched package.'
 # v1.3 keeps its helper beside an arbitrary nested main and preserves BOM bytes.
 # This also crosses the extended-path boundary inside a short-enough root.
-$legacy13=Fixture (('long-profile-'+('x'*102))+'\plugins') '99.42.0-future' './dist/entry.js'
+$paddingLength=[Math]::Max(4,210-($fixtureRoot.Length+18))
+$legacy13=Fixture (('long-profile-'+('x'*$paddingLength))+'\plugins') '99.42.0-future' './dist/entry.js'
 $bomSource=[byte[]](@(239,187,191)+$legacy13.source)
 [IO.File]::WriteAllBytes($legacy13.entry,$bomSource)
 $legacy13Hash=(Hash $bomSource).Replace('-','')
