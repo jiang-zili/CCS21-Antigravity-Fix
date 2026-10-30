@@ -126,6 +126,15 @@ async function main() {
     const native=rawView(false);sidebar.resolveWebviewView(native);assert(native.webview.html.includes(backendUrl));
     const quick=wrapped.window.createWebviewPanel();quick.webview.html='<iframe src="'+backendUrl+'"></iframe>';quick.webview.html='<p>newer render</p>';await new Promise(resolve=>setTimeout(resolve,100));assert.equal(rawViews[rawViews.length-1].webview.html,'<p>newer render</p>');
     const disposed=wrapped.window.createWebviewPanel();disposed.webview.html='<iframe src="'+backendUrl+'"></iframe>';disposed.dispose();await new Promise(resolve=>setTimeout(resolve,100));assert.equal(rawViews[rawViews.length-1].webview.html,'');
+    // Theia throws on panel.webview after it marks the panel disposed.
+    let closed=false, disposeCallback;
+    const underlying=rawView().webview;
+    const theiaPanel={get webview(){if(closed)throw new Error('This WebviewPanel is disposed!');return underlying;},onDidDispose(callback){disposeCallback=callback;return {dispose(){}};},dispose(){closed=true;disposeCallback();}};
+    wrapped.window.registerWebviewPanelSerializer('disposed-theia-panel',{deserializeWebviewPanel(panel){panel.webview.html='<iframe src="'+backendUrl+'"></iframe>';}});
+    serializer.deserializeWebviewPanel(theiaPanel);
+    assert.doesNotThrow(()=>theiaPanel.dispose(),'Disposal must not access panel.webview after the host has disposed the panel');
+    await new Promise(resolve=>setTimeout(resolve,100));
+    assert.equal(underlying.html,'','A pending render must not write into a disposed panel');
     const temporary=fs.mkdtempSync(path.join(os.tmpdir(),'ccs-entry-test-'));
     try {
       const installed=path.join(temporary,'portable extension');fs.mkdirSync(path.join(installed,'dist'),{recursive:true});fs.mkdirSync(path.join(temporary,'node_modules/vscode'),{recursive:true});

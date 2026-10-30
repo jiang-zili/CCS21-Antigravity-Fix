@@ -1,12 +1,12 @@
 # Antigravity / CCS 自动发现修复工具
 
-**v2.0.0：取消扩展版本、安装盘符、入口文件名和压缩符号的固定限制。**
+**v2.0.2：按实际结构适配版本与安装路径，并修复 Theia 面板销毁时的回调异常。**
 
 修复 CCS / Theia 中 Google Antigravity 的 **Couldn't load this view** 问题。同一脚本从 `package.json` 识别扩展身份、版本和实际入口；通过 Webview API 适配侧栏与 Settings，不再搜索或改写某个版本的 `renderIframe`。
 
 ## 双击使用
 
-1. [下载完整 ZIP](https://github.com/jiang-zili/CCS21-Antigravity-Fix/archive/refs/heads/main.zip) 并解压。
+1. 解压包含本说明和 `Run-Fix.cmd` 的完整 ZIP。
 2. 双击 `Run-Fix.cmd`。无需填写扩展版本或安装路径，也可以在 CCS 尚未打开时安装。
 3. 重新启动 CCS，确认左侧聊天和 Antigravity Settings 正常加载。保存提示、登录和首次使用的隐私选择由本人处理。
 
@@ -72,7 +72,7 @@ node .\ccs21-antigravity-proxy.cjs --check-backend http://127.0.0.1:PORT
 
 测试覆盖：重命名、格式化、单/双引号和箭头函数；完整谓词和唯一性检查；注释/字符串伪匹配拒绝；带哈希的脚本与模块路径；压缩响应；精确来源、CSP、认证/CSRF、HTTP 正文、WebSocket 升级及拒绝；冻结的宿主 API；侧栏、自定义编辑器、页面恢复、普通面板、渲染竞争和退出；扩展加载隔离；不同版本与路径、多副本、漏失文件恢复、本地修改拒绝、旧补丁迁移、官方更新、精确恢复及写入失败回滚。测试中的未来版本是人工夹具，不代表实测了这些官方发行版。
 
-已在本机 CCS 21.0.1 / Antigravity 1.8.0 中验证 v2 实际加载，聊天侧栏、模型选择器和 Settings 均已显示；当前后端前端按结构自动识别通过。未发送模型请求。其他发行版以实际接口与结构检查结果为准。
+v2.0.2 针对 Theia 先销毁面板再触发回调的行为添加了回归测试，并验证销毁时取消待完成渲染。本机运行的后端前端通过只读结构、HTTP 和 CSP 代理检查。v2.0.2 尚未在真实 CCS 中安装重启并验证页面，未发送模型请求。其他发行版以实际接口与结构检查结果为准。
 
 修改源码或模板后，执行 `Build-Script.ps1` 重新生成独立脚本与 `SHA256SUMS.txt`。`ccs-discovery.ps1` 保留为 v1.3 的源码参考；v2 使用模板内的发现实现，不加载该旧模块。本项目不构建或修改 TI 用户工程、CCS 核心或 agy.exe，也不安装常驻服务。
 

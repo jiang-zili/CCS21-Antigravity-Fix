@@ -12,7 +12,7 @@ foreach ($part in $parts.Keys) {
     $template=$template.Replace($part,$parts[$part])
 }
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'Fix-CCS21-Antigravity.ps1'),$template,[Text.UTF8Encoding]::new($false))
-$releaseFiles=@('.gitattributes','.gitignore','Build-Script.ps1','CHANGELOG.md','Fix-CCS21-Antigravity.ps1','Fix-CCS21-Antigravity.template.ps1','README.md','Run-Check.cmd','Run-Fix.cmd','Run-Restore.cmd','ccs-discovery.ps1','ccs21-antigravity-proxy.cjs','ccs-antigravity-entry.cjs','test-adapter.cjs','test-backend.cjs','test-installer.ps1','vendor/acorn.cjs','vendor/ACORN-LICENSE','vendor/README.md')
+$releaseFiles=@('.gitattributes','.gitignore','Build-Script.ps1','CHANGELOG.md','Fix-CCS21-Antigravity.ps1','Fix-CCS21-Antigravity.template.ps1','README.md','Run-Check.cmd','Run-Fix.cmd','Run-Restore.cmd','ccs-discovery.ps1','ccs21-antigravity-proxy.cjs','ccs-antigravity-entry.cjs','test-adapter.cjs','test-backend.cjs','test-installer.ps1','test-live-readonly.cjs','vendor/acorn.cjs','vendor/ACORN-LICENSE','vendor/README.md')
 $checksums=foreach ($file in ($releaseFiles | Sort-Object)) {
     $hash=(Get-FileHash -LiteralPath (Join-Path $PSScriptRoot $file) -Algorithm SHA256).Hash.ToLowerInvariant()
     $hash+'  '+$file

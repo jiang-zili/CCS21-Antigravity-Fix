@@ -1,3 +1,9 @@
+# v2.0.2
+
+- Capture the Webview before registering panel disposal so Theia cannot invalidate the getter before the cancellation callback runs.
+- Reproduce Theia's disposed-panel getter and verify a pending render is cancelled without writing to the closed panel.
+- Real application restart and panel rendering remain to be verified.
+
 # v2.0.1
 
 - Recognize the reviewed backend origin guard with configured allowedDomains while preserving its entire validation algorithm.
