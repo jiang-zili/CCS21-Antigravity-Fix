@@ -496,10 +496,13 @@ function wrapVsCodeApi(vscode, getContext) {
     cancellations.set(webview,()=>{generation++;});webviewProxies.set(webview,proxy);return proxy;
   }
   function wrapView(view) {
-    if(!view||!view.webview)return view;
+    if(!view)return view;
     if(viewProxies.has(view))return viewProxies.get(view);
-    wrapWebview(view.webview);
-    if(typeof view.onDidDispose==='function')view.onDidDispose(()=>cancellations.get(view.webview)());
+    const webview=view.webview;
+    if(!webview)return view;
+    wrapWebview(webview);
+    // The host may invalidate the panel.webview getter before firing disposal.
+    if(typeof view.onDidDispose==='function')view.onDidDispose(()=>{const cancel=cancellations.get(webview);if(cancel)cancel();});
     const proxy=facade(view,{get(target,key){return key==='webview'?wrapWebview(target.webview):method(target,key);},set(target,key,value){return Reflect.set(target,key,value,target);}});
     viewProxies.set(view,proxy);return proxy;
   }
